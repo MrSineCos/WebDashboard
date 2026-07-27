@@ -1,0 +1,41 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+.env
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# My note
+error.txt
+note.txt
+
+# Firmware secrets / device certificates (never commit real keys)
+firmware/*
+*.pem
+*.key
+cert.pem
+priv.key
+pub.key
+
+# MQTT simulator config (endpoint/thing name/cert paths — local to each dev)
+tools/mqtt-simulator/config.py
+tools/mqtt-simulator/certs/
