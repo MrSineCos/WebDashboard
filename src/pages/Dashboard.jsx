@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import AppShell from '../components/AppShell.jsx';
+import Avatar from '../components/Avatar.jsx';
 import { useIsMobile } from '../lib/useIsMobile.js';
+import { userAvatarUrl, ownAvatarStoragePath, AVATAR_MAX_BYTES, AVATAR_MIME_TYPES } from '../lib/avatar.js';
 import { useStationSelector, STATION_STATUS_META } from '../lib/stations.js';
 import { useTelemetry, useDevices } from '../lib/telemetry.js';
 import { useUserSettings } from '../lib/userSettings.js';
@@ -17,7 +19,11 @@ const STALE_MS = 60000;
 // Số điểm tối thiểu còn lại trên biểu đồ khi zoom hết cỡ (lăn chuột).
 const MIN_ZOOM_POINTS = 5;
 
-const DEVICE_TYPE_LABEL = { esp32: 'Bộ điều khiển ESP32', inverter: 'Inverter', bms: 'BMS Pin lưu trữ', sensor: 'Cảm biến' };
+// Các mục nav hiển thị như 1 view riêng của Dashboard (thay toàn bộ nội dung),
+// khác với các mục còn lại vốn là section cuộn trong view 'dashboard'.
+const STANDALONE_VIEWS = ['settings', 'load', 'alerts'];
+
+const DEVICE_TYPE_LABEL ={ esp32: 'Bộ điều khiển ESP32', inverter: 'Inverter', bms: 'BMS Pin lưu trữ', sensor: 'Cảm biến' };
 
 // Định dạng thời điểm bản tin (giờ:phút, ngày/tháng) cho dòng ghi chú.
 function fmtClock(ts) {
@@ -128,6 +134,26 @@ function identityErrorText(error) {
   return raw || 'Không thực hiện được, vui lòng thử lại.';
 }
 
+// Lỗi hay gặp nhất khi tải ảnh đại diện là bucket `avatars` chưa tồn tại —
+// migration 0016 chưa chạy trên project Supabase đang dùng. Nói thẳng ra thay
+// vì để nguyên "Bucket not found".
+function avatarErrorText(error) {
+  const raw = error?.message ?? '';
+  if (/bucket not found/i.test(raw)) {
+    return 'Chưa có kho lưu ảnh trên máy chủ. Chạy migration 0016_avatars.sql cho project Supabase rồi thử lại.';
+  }
+  if (/row-level security|not authorized|violates/i.test(raw)) {
+    return 'Không có quyền tải ảnh lên. Kiểm tra lại policy của bucket `avatars` trong Supabase.';
+  }
+  if (/payload too large|exceeded the maximum|file size/i.test(raw)) {
+    return 'Ảnh vượt quá dung lượng cho phép của máy chủ.';
+  }
+  if (/mime type/i.test(raw)) {
+    return 'Định dạng ảnh không được máy chủ chấp nhận.';
+  }
+  return raw || 'Không tải được ảnh lên, vui lòng thử lại.';
+}
+
 const SEVERITY_COLOR = { warning: 'oklch(75% 0.14 70)', danger: 'oklch(58% 0.19 25)', info: 'oklch(54% 0.15 240)' };
 
 const DEVICE_STATUS_COLOR = { connected: 'oklch(64% 0.15 150)', disconnected: 'oklch(58% 0.19 25)' };
@@ -189,6 +215,7 @@ function Switch({ on, onClick }) {
 
 export default function Dashboard() {
   const navigate = useNavigate();
+  const location = useLocation();
   const isMobile = useIsMobile(900);
   const { station, statusMeta, stationColor, stationOptions, stationMenuOpen, toggleStationMenu, closeStationMenu, stations, createStation, deleteStation, loading: stationLoading } = useStationSelector();
   const { latest, readings } = useTelemetry(station?.id);
@@ -219,14 +246,31 @@ export default function Dashboard() {
     const id = setInterval(() => setNow(Date.now()), 20000);
     return () => clearInterval(id);
   }, []);
-  const authProvider = user?.app_metadata?.provider ?? 'email';
-  const avatarUrl = authProvider === 'google' ? (user?.user_metadata?.avatar_url ?? user?.user_metadata?.picture ?? null) : null;
+  const avatarUrl = userAvatarUrl(user);
 
-  // `?view=settings` cho phép quay lại thẳng tab Cài đặt sau khi OAuth
-  // redirect về (luồng liên kết Google) — đọc 1 lần lúc mount rồi xóa param
-  // khỏi URL để refresh sau đó không kẹt lại ở view này.
-  const [activeNav, setActiveNav] = useState(() => (new URLSearchParams(window.location.search).get('view') === 'settings' ? 'settings' : 'overview'));
-  const [currentView, setCurrentView] = useState(() => (new URLSearchParams(window.location.search).get('view') === 'settings' ? 'settings' : 'dashboard'));
+  // Mục cần mở khi vào trang, theo 2 nguồn:
+  //  - `state.view`: điều hướng từ trang Báo cáo/Pin lưu trữ (các trang này
+  //    nằm ở route riêng nên phải gửi kèm mục đã bấm);
+  //  - `?view=settings`: quay lại thẳng tab Cài đặt sau khi OAuth redirect về
+  //    (luồng liên kết Google) — đọc 1 lần lúc mount rồi xóa param khỏi URL
+  //    để refresh sau đó không kẹt lại ở view này.
+  const initialNav = location.state?.view
+    || (new URLSearchParams(window.location.search).get('view') === 'settings' ? 'settings' : 'overview');
+  const [activeNav, setActiveNav] = useState(initialNav);
+  const [currentView, setCurrentView] = useState(() => (STANDALONE_VIEWS.includes(initialNav) ? initialNav : 'dashboard'));
+  // Các mục là section trong trang Dashboard cần cuộn tới sau khi nội dung
+  // render xong (lúc mount vẫn còn màn hình "Đang tải…" nên chưa có element).
+  const pendingScrollRef = useRef(
+    !STANDALONE_VIEWS.includes(initialNav) && initialNav !== 'overview' ? initialNav : null,
+  );
+  useEffect(() => {
+    const id = pendingScrollRef.current;
+    if (!id) return;
+    const el = document.getElementById('sec-' + id);
+    if (!el) return;
+    pendingScrollRef.current = null;
+    window.scrollTo({ top: el.getBoundingClientRect().top + window.scrollY - 20 });
+  });
   const [settingsTab, setSettingsTab] = useState('account');
   // Module "Điều khiển tải"/"Cảnh báo" có thể bị ẩn riêng cho từng trạm —
   // nếu đang xem 1 trong 2 view đó rồi chuyển sang trạm đã ẩn module tương
@@ -276,6 +320,10 @@ export default function Dashboard() {
   const [fullName, setFullName] = useState('');
   const [phone, setPhone] = useState('');
   const [profileSaving, setProfileSaving] = useState(false);
+
+  const avatarInputRef = useRef(null);
+  const [avatarUploading, setAvatarUploading] = useState(false);
+  const [avatarError, setAvatarError] = useState('');
 
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -354,6 +402,72 @@ export default function Dashboard() {
     setProfileSaving(true);
     await supabase.from('profiles').update({ full_name: fullName, phone }).eq('id', user.id);
     setProfileSaving(false);
+  }
+
+  // --- Đổi ảnh đại diện ---
+  //
+  // Ảnh lên bucket public `avatars` theo đường dẫn `<user_id>/<timestamp>.<ext>`
+  // (xem migration 0016): segment đầu là uuid để RLS của storage.objects chặn
+  // được người khác ghi vào thư mục của mình, còn timestamp để mỗi lần đổi ảnh
+  // là một URL mới — ghi đè cùng một tên file sẽ vướng cache CDN và người dùng
+  // vẫn thấy ảnh cũ.
+  //
+  // URL cuối cùng lưu vào `user_metadata.custom_avatar_url` chứ không phải
+  // `avatar_url`: Google ghi đè `avatar_url` mỗi lần đăng nhập lại. Chỉ lưu ở
+  // user_metadata, KHÔNG thêm cột vào bảng profiles — sidebar chỉ có object
+  // `user` trong tay (không truy vấn profiles), và auth.updateUser phát sự kiện
+  // USER_UPDATED nên AuthContext nạp lại session, mọi nơi hiện ảnh mới ngay.
+  async function handleAvatarFile(e) {
+    const file = e.target.files?.[0];
+    // Cho phép chọn lại đúng file vừa chọn (input không phát change nếu value
+    // không đổi) — reset ngay, không đợi tới cuối hàm vì có nhánh return sớm.
+    e.target.value = '';
+    if (!file) return;
+
+    setAvatarError('');
+    if (!AVATAR_MIME_TYPES.includes(file.type)) {
+      setAvatarError('Chỉ hỗ trợ ảnh PNG, JPG, WEBP hoặc GIF.');
+      return;
+    }
+    if (file.size > AVATAR_MAX_BYTES) {
+      setAvatarError(`Ảnh tối đa ${Math.round(AVATAR_MAX_BYTES / 1024 / 1024)}MB — ảnh bạn chọn nặng ${(file.size / 1024 / 1024).toFixed(1)}MB.`);
+      return;
+    }
+
+    setAvatarUploading(true);
+    const ext = (file.name.split('.').pop() || 'png').toLowerCase().replace(/[^a-z0-9]/g, '') || 'png';
+    const path = `${user.id}/${Date.now()}.${ext}`;
+    const { error: uploadError } = await supabase.storage
+      .from('avatars')
+      .upload(path, file, { contentType: file.type, upsert: false });
+    if (uploadError) {
+      setAvatarUploading(false);
+      setAvatarError(avatarErrorText(uploadError));
+      return;
+    }
+
+    const { data: publicData } = supabase.storage.from('avatars').getPublicUrl(path);
+    const publicUrl = publicData.publicUrl;
+
+    const { error: metaError } = await supabase.auth.updateUser({ data: { custom_avatar_url: publicUrl } });
+    if (metaError) {
+      // Dọn object vừa tải lên để không thành mồ côi khi không ai trỏ tới nó.
+      await supabase.storage.from('avatars').remove([path]);
+      setAvatarUploading(false);
+      setAvatarError(avatarErrorText(metaError));
+      return;
+    }
+
+    // Xoá ảnh cũ (nếu ảnh cũ cũng là ảnh tự tải lên) — mỗi lần đổi sinh một
+    // object mới nên không dọn thì dung lượng bucket phình theo số lần đổi.
+    // `user` ở đây là snapshot của lần render này, chưa dính updateUser ở trên,
+    // nên vẫn đang giữ URL cũ — đúng thứ cần xoá.
+    const previousPath = ownAvatarStoragePath(user.user_metadata?.custom_avatar_url, user.id);
+    if (previousPath && previousPath !== path) {
+      await supabase.storage.from('avatars').remove([previousPath]);
+    }
+
+    setAvatarUploading(false);
   }
 
   // Hai chế độ dùng chung 1 form:
@@ -477,7 +591,7 @@ export default function Dashboard() {
 
   function navigateTo(id) {
     setNotifOpen(false);
-    if (id === 'settings' || id === 'load' || id === 'alerts') {
+    if (STANDALONE_VIEWS.includes(id)) {
       setActiveNav(id);
       setCurrentView(id);
       window.scrollTo({ top: 0 });
@@ -1102,14 +1216,34 @@ export default function Dashboard() {
             <div>
               <div style={{ ...sectionCardStyle, marginBottom: '20px' }}>
                 <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '16px', fontWeight: 700, margin: '0 0 18px' }}>Thông tin cá nhân</h2>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '16px', marginBottom: '22px' }}>
-                  {avatarUrl ? (
-                    <img src={avatarUrl} alt="Ảnh đại diện" style={{ width: '56px', height: '56px', borderRadius: '50%', objectFit: 'cover', flexShrink: 0 }} />
-                  ) : (
-                    <div style={{ width: '56px', height: '56px', borderRadius: '50%', background: 'oklch(93% 0.01 240)', border: '1px solid oklch(88% 0.01 240)', flexShrink: 0 }} />
-                  )}
-                  <button style={{ padding: '9px 16px', borderRadius: '9px', border: '1px solid oklch(88% 0.01 240)', background: 'white', fontSize: '13px', fontWeight: 600, color: 'oklch(30% 0.03 240)', cursor: 'pointer' }}>Đổi ảnh đại diện</button>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '16px', marginBottom: avatarError ? '12px' : '22px' }}>
+                  <Avatar
+                    url={avatarUrl}
+                    name={fullName || user?.user_metadata?.full_name}
+                    email={user?.email}
+                    size={56}
+                    background="oklch(93% 0.01 240)"
+                    color="oklch(45% 0.03 240)"
+                    border="1px solid oklch(88% 0.01 240)"
+                  />
+                  <input
+                    ref={avatarInputRef}
+                    type="file"
+                    accept={AVATAR_MIME_TYPES.join(',')}
+                    onChange={handleAvatarFile}
+                    style={{ display: 'none' }}
+                  />
+                  <button
+                    onClick={() => avatarInputRef.current?.click()}
+                    disabled={avatarUploading}
+                    style={{ padding: '9px 16px', borderRadius: '9px', border: '1px solid oklch(88% 0.01 240)', background: 'white', fontSize: '13px', fontWeight: 600, color: 'oklch(30% 0.03 240)', cursor: avatarUploading ? 'default' : 'pointer', fontFamily: "'Manrope',sans-serif", opacity: avatarUploading ? 0.6 : 1 }}
+                  >
+                    {avatarUploading ? 'Đang tải lên…' : 'Đổi ảnh đại diện'}
+                  </button>
                 </div>
+                {avatarError && (
+                  <p style={{ fontSize: '13px', color: 'oklch(50% 0.18 25)', background: 'oklch(93% 0.06 25)', borderRadius: '8px', padding: '10px 12px', margin: '0 0 22px' }}>{avatarError}</p>
+                )}
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '16px' }}>
                   <div>
                     <label style={{ display: 'block', fontSize: '13px', fontWeight: 600, color: 'oklch(32% 0.03 240)', marginBottom: '7px' }}>Họ và tên</label>

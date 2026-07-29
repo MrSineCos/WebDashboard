@@ -2,10 +2,27 @@ import { useEffect, useState } from 'react';
 import { supabase } from './supabaseClient.js';
 import { useAuth } from './AuthContext.jsx';
 
+// Bảng màu trạng thái trạm cho các trang nền sáng (AppShell: Dashboard, Pin
+// lưu trữ, Báo cáo) — kèm `bg`/`textColor` để vẽ huy hiệu trên nền trắng.
 export const STATION_STATUS_META = {
   online: { label: 'Trực tuyến', color: 'oklch(64% 0.15 150)', bg: 'oklch(93% 0.06 150)', textColor: 'oklch(50% 0.14 150)' },
   warning: { label: 'Cảnh báo', color: 'oklch(75% 0.14 70)', bg: 'oklch(95% 0.06 70)', textColor: 'oklch(52% 0.13 70)' },
   offline: { label: 'Mất kết nối', color: 'oklch(58% 0.19 25)', bg: 'oklch(93% 0.06 25)', textColor: 'oklch(52% 0.17 25)' },
+};
+
+// Bản tương đương cho khu vực DevConsole nền tối (/dev, /dev/stations). Chỉ
+// cần `label` + `color` vì ở đó trạng thái luôn hiện dưới dạng chấm tròn +
+// chữ, không có huy hiệu nền.
+//
+// Trước đây hằng này nằm trong DevShell.jsx và trùng đúng tên
+// STATION_STATUS_META với bảng nền sáng ở trên — hai giá trị khác hình dạng,
+// cùng một tên, rất dễ import nhầm file. Đặt cạnh nhau ở đây, tên phân biệt
+// rõ, và DevShell.jsx trở lại chỉ export mỗi component (Fast Refresh của Vite
+// mới hot-swap được file đó thay vì tải lại cả trang).
+export const DEV_STATION_STATUS_META = {
+  online: { label: 'Trực tuyến', color: 'oklch(70% 0.15 150)' },
+  warning: { label: 'Cảnh báo', color: 'oklch(75% 0.14 70)' },
+  offline: { label: 'Mất kết nối', color: 'oklch(62% 0.19 25)' },
 };
 
 function mapRow(row) {

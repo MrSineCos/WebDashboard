@@ -20,6 +20,7 @@ Chạy:
 
 import argparse
 import json
+import os
 import random
 import signal
 import ssl
@@ -45,6 +46,27 @@ class StationSimulator:
     def __init__(self):
         self.battery_pct = 70.0
         self.relays = {load_id: dict(cfg) for load_id, cfg in config.RELAYS.items()}
+        # Chẩn đoán phần cứng (migration 0017). Mốc thời gian bắt đầu tiến
+        # trình = "lần boot" của thiết bị giả lập; boot_count đếm số lần chạy
+        # script, giữ trong một file cạnh config để sống qua các lần khởi động
+        # lại — đúng vai trò bộ đếm NVS trên ESP32 thật.
+        self.started_at = time.time()
+        self.boot_count = self._bump_boot_count()
+
+    @staticmethod
+    def _bump_boot_count():
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".boot_count")
+        try:
+            with open(path) as f:
+                count = int(f.read().strip()) + 1
+        except (OSError, ValueError):
+            count = 1
+        try:
+            with open(path, "w") as f:
+                f.write(str(count))
+        except OSError:
+            pass  # chỉ là số liệu chẩn đoán — không đáng làm hỏng lần chạy
+        return count
 
     def solar_kw(self, hour):
         # Đường cong hình chuông, đạt đỉnh ~giữa trưa, bằng 0 ngoài khung 6h-18h.
@@ -78,8 +100,12 @@ class StationSimulator:
             "battery_pct": round(self.battery_pct, 1),
             "battery_voltage": battery_voltage,
             "load_w": load_w,
+            # Nhiệt độ pack pin — khác mcu_temp_c (nhiệt độ lõi MCU) bên dưới.
             "temp_c": temp_c,
             "rssi": rssi,
+            "uptime_s": int(time.time() - self.started_at),
+            "mcu_temp_c": round(42 + random.uniform(-3, 5), 1),
+            "boot_count": self.boot_count,
         }
         if self.relays:
             payload["loads"] = {

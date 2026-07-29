@@ -71,7 +71,14 @@ export default function Reports() {
 
   function onNavigate(id) {
     if (id === 'reports') return;
-    navigate('/');
+    if (id === 'battery') {
+      navigate('/battery');
+      return;
+    }
+    // `state.fromDev` giữ admin ở lại giao diện người dùng — thiếu cờ này,
+    // ProtectedRoute coi đây là lần vào "/" thông thường và đá admin về
+    // DevConsole. `state.view` để Dashboard mở đúng mục vừa bấm.
+    navigate('/', { state: { fromDev: true, view: id } });
   }
 
   // Module "Báo cáo" có thể bị ẩn riêng cho từng trạm — nếu đang ở trang này

@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import DevShell, { STATION_STATUS_META } from '../components/DevShell.jsx';
+import DevShell from '../components/DevShell.jsx';
 import { useIsMobile } from '../lib/useIsMobile.js';
-import { useStations } from '../lib/stations.js';
+import { DEV_STATION_STATUS_META, useStations } from '../lib/stations.js';
 import { useDevices } from '../lib/telemetry.js';
 import { useAuth } from '../lib/AuthContext.jsx';
 
@@ -27,7 +27,7 @@ function StationRow({ station, devices, registerDevice, confirming, onDeleteClic
   const [copied, setCopied] = useState(false);
 
   const stationDevices = devices.filter((d) => d.station_id === station.id);
-  const m = STATION_STATUS_META[station.status];
+  const m = DEV_STATION_STATUS_META[station.status];
 
   function copyId() {
     navigator.clipboard?.writeText(station.id);

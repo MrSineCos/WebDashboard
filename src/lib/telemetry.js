@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { supabase } from './supabaseClient.js';
 import { useAuth } from './AuthContext.jsx';
 
@@ -10,8 +10,16 @@ function mapRow(row) {
     batteryPct: row.battery_pct,
     batteryVoltage: row.battery_voltage,
     loadW: row.load_w,
+    // Nhiệt độ pack pin. Nhiệt độ lõi MCU là `mcuTempC` bên dưới — hai đại
+    // lượng khác nhau, đừng dùng lẫn (xem migration 0017).
     tempC: row.temp_c,
     rssi: row.rssi,
+    // Chẩn đoán phần cứng (0017). DevConsole đọc snapshot mới nhất trên
+    // `devices` chứ không qua đây; giữ trong map để chuỗi thời gian dùng được
+    // ngay khi cần (heap tụt dần = rò bộ nhớ, boot_count đổi = vừa reboot).
+    uptimeS: row.uptime_s,
+    mcuTempC: row.mcu_temp_c,
+    bootCount: row.boot_count,
     extra: row.extra || {},
   };
 }
@@ -212,13 +220,13 @@ export function useDevices() {
   const { user } = useAuth();
   const [devices, setDevices] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     if (!user) return;
     let cancelled = false;
 
     async function load() {
-      setLoading(true);
       const { data } = await supabase
         .from('devices')
         .select('*')
@@ -232,7 +240,14 @@ export function useDevices() {
     return () => {
       cancelled = true;
     };
-  }, [user]);
+  }, [user, reloadKey]);
+
+  // Đọc lại `devices` mà KHÔNG bật lại `loading` — các cột do thiết bị báo về
+  // (fw_version/fw_status, ap_ssid) đổi ngoài luồng thao tác của người dùng,
+  // nên UI cần một cách nạp lại im lặng để danh sách không nháy mỗi nhịp poll
+  // trong lúc một thiết bị đang nạp OTA. Ổn định qua các lần render để dùng
+  // được thẳng trong mảng phụ thuộc của useEffect bên phía trang.
+  const refreshDevices = useCallback(() => setReloadKey((k) => k + 1), []);
 
   async function registerDevice({ stationId, name, type, awsThingName }) {
     const { data, error } = await supabase.rpc('register_device', {
@@ -288,5 +303,5 @@ export function useDevices() {
     return invokeProvision({ device_id: id, action: 'list' });
   }
 
-  return { devices, registerDevice, removeDevice, provisionDevice, listDeviceCertificates, loading };
+  return { devices, registerDevice, removeDevice, provisionDevice, listDeviceCertificates, refreshDevices, loading };
 }

@@ -43,7 +43,14 @@ export default function Battery() {
 
   function onNavigate(id) {
     if (id === 'battery') return;
-    navigate('/');
+    if (id === 'reports') {
+      navigate('/reports');
+      return;
+    }
+    // `state.fromDev` giữ admin ở lại giao diện người dùng — thiếu cờ này,
+    // ProtectedRoute coi đây là lần vào "/" thông thường và đá admin về
+    // DevConsole. `state.view` để Dashboard mở đúng mục vừa bấm.
+    navigate('/', { state: { fromDev: true, view: id } });
   }
 
   // Module "Pin lưu trữ" có thể bị ẩn riêng cho từng trạm — nếu người dùng

@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../lib/AuthContext.jsx';
+import { userAvatarUrl } from '../lib/avatar.js';
+import Avatar from './Avatar.jsx';
 
 const NAV_ITEMS = [
   {
@@ -151,7 +153,18 @@ export default function AppShell({
   const visibleNavItems = NAV_ITEMS.filter(
     (item) => item.id === 'overview' || item.id === 'settings' || (moduleVisibility[item.id] ?? true),
   );
-  const avatarUrl = user?.app_metadata?.provider === 'google' ? (user?.user_metadata?.avatar_url ?? user?.user_metadata?.picture ?? null) : null;
+  const avatarUrl = userAvatarUrl(user);
+  const sidebarAvatar = (
+    <Avatar
+      url={avatarUrl}
+      name={user?.user_metadata?.full_name || user?.user_metadata?.name}
+      email={user?.email}
+      size={34}
+      background="oklch(32% 0.04 240)"
+      color="white"
+      border="1px solid oklch(40% 0.04 240)"
+    />
+  );
 
   const currentStationDotStyle = { width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0, background: stationColor };
 
@@ -224,11 +237,7 @@ export default function AppShell({
           )}
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '12px 8px', borderTop: '1px solid oklch(32% 0.04 240 / 0.5)' }}>
-            {avatarUrl ? (
-              <img src={avatarUrl} alt="Ảnh đại diện" style={{ width: '34px', height: '34px', borderRadius: '50%', objectFit: 'cover', flexShrink: 0 }} />
-            ) : (
-              <div style={{ width: '34px', height: '34px', borderRadius: '50%', background: 'oklch(32% 0.04 240)', border: '1px solid oklch(40% 0.04 240)', flexShrink: 0 }} />
-            )}
+            {sidebarAvatar}
             <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: '13px', fontWeight: 700, color: 'white', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>Hộ gia đình</div>
               <div style={{ fontSize: '11.5px', color: 'oklch(65% 0.03 240)' }}>Tài khoản chủ hộ</div>

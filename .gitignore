@@ -39,3 +39,6 @@ pub.key
 # MQTT simulator config (endpoint/thing name/cert paths — local to each dev)
 tools/mqtt-simulator/config.py
 tools/mqtt-simulator/certs/
+# Bộ đếm boot của simulator (giả lập NVS của ESP32) — trạng thái cục bộ.
+tools/mqtt-simulator/.boot_count
+__pycache__/
