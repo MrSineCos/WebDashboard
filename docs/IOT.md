@@ -867,9 +867,23 @@ giá trị khi người dùng không tự sửa được nó.
 
 ```bash
 supabase db push                                  # áp 0018 + 0019
-supabase functions deploy archive-telemetry
-supabase secrets set MAINTENANCE_SHARED_SECRET=$(openssl rand -hex 32)
+supabase functions deploy archive-telemetry --no-verify-jwt
+
+SECRET=$(openssl rand -hex 32)
+echo "$SECRET"          # GIỮ LẠI chuỗi này — Vault ở bước dưới cần đúng nó
+supabase secrets set MAINTENANCE_SHARED_SECRET="$SECRET"
 ```
+
+`--no-verify-jwt` **bắt buộc**, cùng lý do với `ingest-telemetry`: hàm này nhận
+hai loại credential (shared secret từ pg_cron, JWT người dùng từ DevConsole),
+mà cổng Edge Functions chỉ hiểu JWT — thiếu cờ này thì cron nhận
+`UNAUTHORIZED_INVALID_JWT_FORMAT` trước khi code hàm chạy. Xác thực vẫn đầy đủ,
+chỉ là do hàm tự làm (xem đầu file `archive-telemetry/index.ts`).
+
+Đừng chạy `supabase secrets set MAINTENANCE_SHARED_SECRET=$(openssl rand -hex 32)`
+một dòng: chuỗi sinh ra không hiện ra đâu cả, mà Vault ở bước sau cần đúng nó,
+và Supabase không cho đọc lại giá trị secret (`supabase secrets list` chỉ hiện
+digest).
 
 Rồi nạp URL + secret vào Vault để pg_cron gọi được Edge Function (SQL Editor):
 
@@ -961,7 +975,9 @@ supabase functions deploy archive-telemetry
 |---|---|
 | Nhật ký trống dù thiết bị đang chạy | Đúng như thiết kế — chỉ ghi khi trạng thái đổi. Tắt simulator 90 giây để thấy dòng đầu tiên. |
 | Log mới không tự hiện, phải F5 | Bảng chưa vào publication realtime: `alter publication supabase_realtime add table public.system_logs;` |
-| "Chạy dọn ngay" lỗi 401/404 | Chưa `supabase functions deploy archive-telemetry`. |
+| "Chạy dọn ngay" lỗi 401/404 | Chưa `supabase functions deploy archive-telemetry --no-verify-jwt`. |
+| `net._http_response` trả 401 `UNAUTHORIZED_INVALID_JWT_FORMAT` | Deploy thiếu `--no-verify-jwt` — cổng chặn shared secret vì nó không phải JWT. Deploy lại kèm cờ đó. |
+| `net._http_response` trả 401 `{"error":"unauthorized"}` | Đây là hàm từ chối (không phải cổng): chuỗi trong Vault lệch với `MAINTENANCE_SHARED_SECRET`. Đặt lại cả hai nơi. |
 | Job đêm không chạy nhưng nút bấm tay chạy được | Chưa nạp secret vào Vault (mục 12.3) — nút bấm tay dùng JWT người dùng, không cần Vault. |
 | Log `archive_storage_full` | Storage đã dùng >900 MB. Xoá bớt gói cũ trong "Gói đã lưu trữ". |
 | Log `telemetry_hard_purge` | Lưới an toàn đã phải xoá dữ liệu chưa lưu trữ được — đường lưu trữ đang hỏng, sửa ngay. |

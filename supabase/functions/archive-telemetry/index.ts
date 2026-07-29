@@ -21,7 +21,16 @@
 // nén lại — với gói vài chục MB là hết bộ nhớ. Nên: một thư mục `YYYY-MM`,
 // nhiều `part-*.csv.gz` bên trong.
 //
-// Deploy:  supabase functions deploy archive-telemetry
+// Deploy:  supabase functions deploy archive-telemetry --no-verify-jwt
+//
+//   `--no-verify-jwt` là BẮT BUỘC, cùng lý do với ingest-telemetry: hàm này
+//   nhận hai loại credential khác nhau, mà cổng Edge Functions chỉ hiểu được
+//   một. pg_cron gửi `Bearer <MAINTENANCE_SHARED_SECRET>` (chuỗi hex, không
+//   phải JWT) nên cổng chặn ngay với UNAUTHORIZED_INVALID_JWT_FORMAT trước khi
+//   code này chạy. Tắt kiểm tra ở cổng rồi tự xác thực bên dưới (xem Deno.serve)
+//   — không nới lỏng gì cả: request không mang shared secret ĐÚNG hoặc JWT hợp
+//   lệ vẫn nhận 401, chỉ khác là do hàm này từ chối chứ không phải cổng.
+//
 // Secrets: supabase secrets set MAINTENANCE_SHARED_SECRET=...
 //   Tuỳ chọn: ARCHIVE_STORAGE_BUDGET_BYTES (mặc định 900 MB — chừa chỗ so với
 //   hạn mức 1 GB của free plan).
