@@ -1,18 +1,14 @@
 import { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
+import { DEV_STATION_STATUS_META } from '../lib/stations.js';
 
 const ACCENT = 'oklch(75% 0.13 200)';
 
 // Bản dark-theme tương đương AppShell.jsx (dùng cho Dashboard/Battery/Reports)
 // — sidebar/topbar/drawer dùng chung cho các trang trong khu vực DevConsole
-// (/dev, /dev/stations). Trạng thái trạm hiện tại (dot màu status) tra theo
-// STATION_STATUS_META xuất ở đây vì cả DevConsole.jsx lẫn DevStations.jsx
-// đều cần dùng lại đúng bảng màu này.
-export const STATION_STATUS_META = {
-  online: { label: 'Trực tuyến', color: 'oklch(70% 0.15 150)' },
-  warning: { label: 'Cảnh báo', color: 'oklch(75% 0.14 70)' },
-  offline: { label: 'Mất kết nối', color: 'oklch(62% 0.19 25)' },
-};
+// (/dev, /dev/stations). Bảng màu trạng thái trạm nằm ở lib/stations.js cạnh
+// bản nền sáng, không xuất từ file này: file component chỉ export component
+// thì Vite mới hot-swap được nó khi sửa, thay vì tải lại cả trang.
 
 const NAV_ITEMS = [
   {
@@ -88,6 +84,17 @@ const NAV_ITEMS = [
     ),
   },
   {
+    id: 'retention',
+    label: 'Lưu trữ & dọn dữ liệu',
+    icon: (
+      <svg width="17" height="17" viewBox="0 0 20 20">
+        <ellipse cx="10" cy="5" rx="6.5" ry="2.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
+        <path d="M3.5 5v5c0 1.4 2.9 2.5 6.5 2.5s6.5-1.1 6.5-2.5V5" fill="none" stroke="currentColor" strokeWidth="1.5" />
+        <path d="M3.5 10v5c0 1.4 2.9 2.5 6.5 2.5s6.5-1.1 6.5-2.5v-5" fill="none" stroke="currentColor" strokeWidth="1.5" />
+      </svg>
+    ),
+  },
+  {
     id: 'simulation',
     label: 'Chế độ mô phỏng',
     icon: (
@@ -155,7 +162,7 @@ export default function DevShell({
   const location = useLocation();
   const stationsPageActive = location.pathname === '/dev/stations';
 
-  const curMeta = STATION_STATUS_META[currentStation.status];
+  const curMeta = DEV_STATION_STATUS_META[currentStation.status];
   const currentStationDotStyle = { width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0, background: curMeta.color };
 
   function navigateAndCloseDrawer(id) {
@@ -170,7 +177,7 @@ export default function DevShell({
 
   const stationMenuRows = (showStatus) =>
     stations.map((s) => {
-      const m = STATION_STATUS_META[s.status];
+      const m = DEV_STATION_STATUS_META[s.status];
       const isSel = s.id === currentStation.id;
       return (
         <div

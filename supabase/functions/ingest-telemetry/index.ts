@@ -34,7 +34,30 @@ const NUMERIC_FIELDS = [
   "load_w",
   "temp_c",
   "rssi",
+  // Hardware diagnostics (migration 0017). `mcu_temp_c` is the MCU core
+  // temperature and is deliberately NOT the same column as `temp_c`, which is
+  // the battery pack temperature the Battery page reads.
+  "uptime_s",
+  "mcu_temp_c",
+  "boot_count",
 ] as const;
+
+// integer/bigint columns. PostgREST rejects a JSON value with a decimal point
+// outright (no implicit rounding), so a device reporting e.g. 69.9 for an
+// integer column would fail the whole insert — round before sending.
+// `rssi` belongs here too: it has always been an `integer` column (0003), so a
+// device reporting -58.5 used to take the entire telemetry message down.
+const INTEGER_FIELDS = new Set([
+  "battery_pct",
+  "rssi",
+  "uptime_s",
+  "boot_count",
+]);
+
+// Counters cannot be negative. A negative value means the firmware is broken
+// (or an unsigned value overflowed on the way here), so drop that one field
+// rather than put a nonsense number on the diagnostics panel.
+const NON_NEGATIVE_FIELDS = new Set(["uptime_s", "boot_count"]);
 
 // Battery-protection state a device reports alongside telemetry (see the
 // firmware protection loop + migration 0012). Booleans/string, so they're
@@ -95,6 +118,34 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
+// Nhật ký hệ thống (migration 0018). Chỉ ghi những sự kiện RỜI RẠC — tuyệt đối
+// không ghi mỗi bản tin telemetry: chu kỳ ~10 giây nghĩa là 8.640 dòng/ngày/
+// thiết bị, tức nhật ký sẽ tốn chỗ hơn cả dữ liệu mà nó mô tả.
+//
+// Lỗi ghi log không được làm hỏng lượt ingest: telemetry mới là payload quan
+// trọng và nó đã vào bảng rồi khi hàm này được gọi.
+async function logEvent(
+  ownerId: string,
+  stationId: string | null,
+  deviceId: string | null,
+  level: "info" | "warn" | "error",
+  event: string,
+  message: string,
+  meta: Record<string, unknown> = {},
+) {
+  const { error } = await admin.from("system_logs").insert({
+    owner_id: ownerId,
+    station_id: stationId,
+    device_id: deviceId,
+    level,
+    source: "ingest",
+    event,
+    message,
+    meta,
+  });
+  if (error) console.error("system_logs insert failed:", error.message);
+}
+
 Deno.serve(async (req) => {
   if (req.method !== "POST") {
     return json({ error: "method_not_allowed" }, 405);
@@ -138,7 +189,7 @@ Deno.serve(async (req) => {
   const { data: device, error: deviceErr } = await admin
     .from("devices")
     .select(
-      "id, station_id, owner_id, ap_ssid, ap_password, fw_version, fw_status, fw_target_id",
+      "id, name, station_id, owner_id, ap_ssid, ap_password, fw_version, fw_status, fw_target_id",
     )
     .eq("aws_thing_name", clientId)
     .maybeSingle();
@@ -169,10 +220,13 @@ Deno.serve(async (req) => {
   for (const field of NUMERIC_FIELDS) {
     const v = payload[field];
     if (typeof v !== "number") continue;
-    // `battery_pct` is an `integer` column; PostgREST rejects a JSON value
-    // with a decimal point outright (no implicit rounding), so a device
-    // reporting e.g. 69.9 would fail the insert.
-    row[field] = field === "battery_pct" ? Math.round(v) : v;
+    if (NON_NEGATIVE_FIELDS.has(field) && v < 0) {
+      // Same policy as the AP/firmware reports below: one bad diagnostic field
+      // is worth a log, not a 500 that drops the whole reading.
+      console.warn(`ignoring negative ${field} from ${clientId}`);
+      continue;
+    }
+    row[field] = INTEGER_FIELDS.has(field) ? Math.round(v) : v;
   }
 
   for (const field of BOOL_FIELDS) {
@@ -317,6 +371,30 @@ Deno.serve(async (req) => {
     // finished update from one the device silently ignored.
     if (Object.keys(patch).length > 0) {
       await admin.from("devices").update(patch).eq("id", device.id);
+    }
+
+    // Nhật ký (0018): chỉ ghi khi một lần OTA KẾT THÚC, và chỉ khi trạng thái
+    // thực sự đổi. Thiết bị lặp lại 'downloading' hàng chục lần trong một lần
+    // nạp — ghi hết thì nhật ký thành bản sao của telemetry.
+    const nextStatus = patch.fw_status as string | undefined;
+    if (nextStatus && nextStatus !== device.fw_status) {
+      const runningVersion = (patch.fw_version as string | undefined) ?? device.fw_version;
+      if (nextStatus === "success") {
+        await logEvent(
+          device.owner_id, device.station_id, device.id,
+          "info", "ota_success",
+          `Cập nhật firmware ${runningVersion ?? ""} thành công trên ${device.name}`.trim(),
+          { version: runningVersion },
+        );
+      } else if (nextStatus === "failed") {
+        const detail = (patch.fw_status_detail as string | null) ?? null;
+        await logEvent(
+          device.owner_id, device.station_id, device.id,
+          "error", "ota_failed",
+          `Cập nhật firmware thất bại trên ${device.name}${detail ? ` — ${detail}` : ""}`,
+          { detail, version: runningVersion },
+        );
+      }
     }
   }
 

@@ -200,9 +200,12 @@ Xem mẫu ở `firmware/esp32-solgrid/esp32-solgrid.ino`. Thiết bị:
 - Kết nối WiFi, rồi TLS tới AWS IoT ATS endpoint (`<prefix>-ats.iot.<region>.amazonaws.com:8883`) bằng cert/key.
 - Client id = thing name (vd `solgrid-esp32-01`).
 - Publish JSON theo chu kỳ lên `solgrid/<station>/telemetry`, ví dụ:
-  `{"solar_kw":2.1,"battery_pct":80,"battery_voltage":48.5,"battery_current":12,"load_w":900,"temp_c":42,"rssi":-58,"charge_enabled":true,"discharge_enabled":true,"protect_reason":"ok"}`
+  `{"solar_kw":2.1,"battery_pct":80,"battery_voltage":48.5,"battery_current":12,"load_w":900,"temp_c":42,"rssi":-58,"charge_enabled":true,"discharge_enabled":true,"protect_reason":"ok","uptime_s":523920,"mcu_temp_c":42,"boot_count":3}`
   (`battery_current`/`charge_enabled`/`discharge_enabled`/`protect_reason` là
-  của cơ chế bảo vệ sạc/xả — mục 8; đều tuỳ chọn).
+  của cơ chế bảo vệ sạc/xả — mục 8; `uptime_s`/`mcu_temp_c`/`boot_count` là
+  chẩn đoán phần cứng — mục 11; đều tuỳ chọn).
+  **`temp_c` là nhiệt độ PACK PIN, `mcu_temp_c` là nhiệt độ lõi MCU** — hai
+  đại lượng khác nhau, hai cột khác nhau, đừng gửi lẫn.
 - Nếu ESP32 này điều khiển tải (mục 6), payload còn kèm
   `"loads":{"<load-uuid>":"on"}` — trạng thái relay thật, không phải lệnh vừa nhận.
 - Nếu ESP32 phát SoftAP (mục 9), **bản tin đầu sau mỗi lần reconnect** kèm
@@ -435,8 +438,8 @@ firmware qua HTTP server chạy trên chính ESP32.
 Luồng đã chạy được đầu-cuối: migration `0015_firmware_ota.sql` dựng **tầng lưu
 trữ** (catalog bản phát hành, bucket chứa `.bin`, cột theo dõi phiên bản trên
 `devices`), `send-ota-command` lo **chiều đẩy lệnh**, firmware lo **tải + kiểm
-hash + nạp**, `ingest-telemetry` lo **chiều thiết bị báo về**. Chỉ còn giao
-diện DevConsole vẫn là demo — xem 10.8.
+hash + nạp**, `ingest-telemetry` lo **chiều thiết bị báo về**, và DevConsole lo
+**giao diện** (tải lên, chọn bản, đẩy, theo dõi) — xem 10.8.
 
 ```
 Dev build .bin ──upload──▶ Storage bucket `firmware` (private)
@@ -714,12 +717,254 @@ lỗi thì không bao giờ được boot.
 (1,025 KB / 1,311 KB); riêng phần OTA tốn ~38 KB. Còn ~285 KB dư — đủ nhưng
 không nhiều, cần để ý khi thêm tính năng (nhất là trang web cục bộ ở mục 9.2).
 
-### 10.8 Còn thiếu
+### 10.8 Giao diện — DevConsole → Quản lý Firmware MCU
 
-1. **DevConsole**: khối "Quản lý Firmware MCU" hiện vẫn là demo (hằng số
-   `FIRMWARE_DEVICES`/`FIRMWARE_HISTORY`, ô kéo-thả `.bin` không có handler,
-   nút "Đẩy OTA" không có `onClick`) — thay bằng dữ liệu thật từ
-   `firmware_releases`/`devices`, nối `send-ota-command`, và gỡ `<DemoBadge />`.
+Ba khối, đúng ba đường dữ liệu khác nhau (`src/lib/firmware.js` +
+`src/pages/DevConsole.jsx`):
+
+1. **Thiết bị** — đọc thẳng `devices` (RLS select-own). Hiện `fw_version` thiết
+   bị tự báo, huy hiệu `fw_status`, và `fw_status_detail` đã dịch sang tiếng
+   Việt (`sha_mismatch` → "hash không khớp, file tải về hỏng"; `http_403` →
+   "link tải đã hết hạn"). Khi `fw_target_id` trỏ tới bản khác với `fw_version`,
+   hàng thiết bị hiện thêm dòng "Đã đẩy vX — thiết bị chưa xác nhận": đó chính
+   là tín hiệu nạp hỏng ở mục 10.6, cố tình không rút gọn thành "đã cập nhật".
+   `<select>` chọn bản + nút "Đẩy OTA đến tất cả thiết bị" (`station_id`) và
+   nút "Cập nhật" từng dòng (`device_id`) — đúng hai nhánh của
+   `send-ota-command`. Chỉ liệt kê thiết bị `type='esp32'`, khớp bộ lọc của
+   chính function.
+
+2. **Tải bản firmware mới lên** — kéo-thả hoặc chọn `.bin`; SHA-256 tính **tại
+   trình duyệt** từ đúng bytes sắp gửi (Web Crypto ⇒ cần HTTPS hoặc
+   localhost), rồi upload vào bucket `firmware` với
+   `contentType: 'application/octet-stream'` và insert `firmware_releases`.
+   Hai bước không nguyên tử: nếu insert lỗi (trùng board+version...), object
+   vừa tải lên được xoá lại ngay để không thành mồ côi (mục 10.4). Ô **Board**
+   mặc định `esp32s3-solgrid`; **Phiên bản** tự gợi ý từ tên file nhưng vẫn
+   phải soát — cả hai chuỗi phải trùng `FW_BOARD`/`FW_VERSION` trong `.ino`.
+
+3. **Bản phát hành** — catalog thật. Bấm một hàng để chọn bản sẽ đẩy;
+   **rollback = chọn một bản cũ hơn rồi bấm "Cập nhật"**, không có nút riêng vì
+   không cần. Huy hiệu "Đang chạy" so theo `devices.fw_version` (thiết bị báo
+   về) chứ không theo bản cloud đã gửi lệnh. Nút "Xoá" xoá **file trong bucket
+   trước, hàng sau** — đúng thứ tự bắt buộc ở mục 10.4.
+
+Vài điểm về hành vi:
+
+- **Không có realtime trên `devices`.** Sau khi đẩy, trang poll lại 5 giây một
+  lần *chỉ khi* có thiết bị đang ở `pending`/`downloading`/`applying`, và tối đa
+  5 phút mỗi lần đẩy: thiết bị offline lúc publish sẽ kẹt ở `pending` vô hạn
+  (QoS 1 không giao lại), nên vòng poll phải có hạn.
+- **"Đã gửi lệnh" ≠ "đã nạp xong".** Thông báo sau khi đẩy chỉ nói số thiết bị
+  mà lệnh tới được AWS (kèm tên những thiết bị publish lỗi từ `failed_devices`).
+  Xác nhận nạp xong chỉ đến từ `fw_version` thiết bị báo về.
+- **Không có "Tự động cập nhật OTA khi có bản mới".** Switch này từng có trong
+  bản demo nhưng đã gỡ: không có gì ở server thực hiện nó, và tự đẩy firmware
+  lên phần cứng thật mà không ai bấm là hành vi không nên có mặc định.
+
+## 11. Chẩn đoán phần cứng (DevConsole → Tổng quan thiết bị)
+
+Bốn ô chỉ số ở đầu DevConsole. Trước đây chúng lấy từ hằng số `DIAG_BY_STATUS`
+trong `DevConsole.jsx` (chỉ đổi theo status của trạm) dù tiêu đề ghi "thời gian
+thực"; migration `0017_device_diagnostics.sql` dựng đường ống thật.
+
+| Ô | Nguồn | Cần firmware mới? |
+|---|---|---|
+| Thời gian hoạt động | `devices.uptime_s` | Có |
+| Nhiệt độ MCU | `devices.mcu_temp_c` | Có |
+| Số lần khởi động lại | `devices.boot_count` | Có |
+| Kết nối MQTT Broker | `devices.status` | Không — đã có sẵn |
+
+Đi cùng đường với mọi số đo khác, không thêm Edge Function nào:
+
+```
+firmware: uptime_s / mcu_temp_c / boot_count kèm MỖI bản tin telemetry
+   ▼
+ingest-telemetry (chỉ thêm 3 tên vào NUMERIC_FIELDS) → insert telemetry
+   ▼
+trigger apply_telemetry → snapshot mới nhất lên devices.*  ──▶ DevConsole
+```
+
+- **Hai nơi lưu, có chủ đích.** `telemetry` giữ chuỗi thời gian (biết thiết bị
+  reboot lúc nào, MCU nóng lên vào khung giờ nào); `devices` giữ snapshot để UI
+  đọc một phát ra giá trị hiện tại của từng thiết bị. Trigger `apply_telemetry`
+  vốn đã cập nhật `devices.status`/`last_seen_at` mỗi bản tin, nên 3 phép gán
+  thêm **không tốn lượt ghi nào**.
+- **Chỉ số là của MỘT thiết bị, không phải của trạm.** Một trạm nhiều ESP32 thì
+  mỗi con có uptime/nhiệt độ riêng — DevConsole hiện `<select>` chọn thiết bị
+  khi trạm có >1 ESP32, mặc định lấy con báo dữ liệu gần đây nhất.
+- **Firmware cũ vẫn chạy bình thường**: ba cột là null → ô hiện "—" kèm chú
+  thích "Thiết bị chưa báo", cố tình không hiện `0` (không phân biệt được
+  "chưa biết" với "bằng 0"). Cùng quy ước với `ap_ssid` (mục 9) và
+  `fw_version` (mục 10).
+- **`boot_count` nằm trong NVS** (`Preferences`, namespace `diag`) nên sống qua
+  mất điện, và tăng ở ngay đầu `setup()` — để đếm được cả những lần boot rồi
+  chết ngay sau đó, vốn là những lần đáng quan tâm nhất.
+- **`uptime_s` chống tràn `millis()`**: `millis()` quay vòng sau 49.7 ngày, mà
+  trạm điện mặt trời chạy liên tục hàng tháng nên tràn là chuyện chắc chắn xảy
+  ra. `uptimeSeconds()` đếm số vòng đã qua, nếu không uptime sẽ tụt về 0 và báo
+  sai là thiết bị vừa reboot.
+- **Buffer JSON của firmware nâng lên 1024** (trước là 768). Bản tin nặng nhất
+  (bản đầu sau reconnect: số đo + chẩn đoán + bảo vệ + AP + firmware) không còn
+  vừa 768, mà **ArduinoJson im lặng bỏ trường khi tràn** — thiếu chỗ là mất dữ
+  liệu chứ không có lỗi nào báo ra.
+
+### 11.1 Kiểm thử
+
+Simulator (mục 7.1) đã gửi đủ ba trường, nên thử được không cần phần cứng:
+
+```bash
+supabase db push                       # áp 0017
+supabase functions deploy ingest-telemetry --no-verify-jwt
+cd tools/mqtt-simulator && python simulate_esp32.py
+```
+
+→ DevConsole → Tổng quan thiết bị: uptime tăng dần theo thời gian chạy script,
+`boot_count` tăng thêm 1 mỗi lần khởi động lại script (lưu ở
+`tools/mqtt-simulator/.boot_count`, đóng vai NVS). Tắt script và chờ 90 giây →
+ô MQTT chuyển **Disconnected** (`mark_stale_offline`, mục 0006).
+
+## 12. Nhật ký hệ thống + lưu trữ & dọn dữ liệu
+
+Migration `0018_system_logs.sql` và `0019_telemetry_retention.sql`, Edge
+Function `archive-telemetry`, UI ở DevConsole → **Nhật ký hệ thống** và
+**Lưu trữ & dọn dữ liệu**.
+
+### 12.1 Vì sao cần
+
+`telemetry` là bảng duy nhất tăng tuyến tính theo thời gian. Firmware publish
+~10 giây/lần → 8.640 dòng/ngày/thiết bị, mỗi dòng ~250 byte kể cả hai index
+của 0003 → **~2,2 MB/ngày/thiết bị**. Năm thiết bị chạy liên tục chạm hạn mức
+500 MB của Supabase free plan sau khoảng sáu tuần — và khi database đầy thì
+`ingest-telemetry` bắt đầu lỗi, tức là **mất dữ liệu mới**, không phải dữ liệu cũ.
+
+Nhật ký hệ thống thì ngược lại: chỉ ghi **sự kiện rời rạc**, vài trăm dòng/ngày
+cho toàn hệ thống — nhỏ hơn telemetry 20–100 lần.
+
+Storage (1 GB) và database (500 MB) là **hai hạn mức tách biệt**, nên chuyển
+dữ liệu cũ sang Storage thực sự giải phóng chỗ chứ không phải chuyển chỗ đau.
+
+### 12.2 Nguồn sinh log
+
+| Sự kiện | Mức | Ghi ở đâu |
+|---|---|---|
+| `device_online` / `device_offline` | info / error | Trigger `devices_log_status_change` (0018) |
+| `battery_below_threshold` / `battery_recovered` | warn / info | Trigger `stations_log_battery_alert` (0018) |
+| `ota_pushed` | info / warn | `send-ota-command` |
+| `ota_success` / `ota_failed` | info / error | `ingest-telemetry` |
+| `archive_completed` / `purge_completed` | info | `archive-telemetry` |
+| `archive_storage_full`, `archive_upload_failed`, `telemetry_hard_purge` | error | `archive-telemetry` / `purge_telemetry_overdue` |
+
+Nguyên tắc chung: **chỉ ghi khi trạng thái thực sự đổi**. `apply_telemetry`
+chạy mỗi bản tin và luôn đặt `status='connected'`; nếu ghi log mỗi lần chạy thì
+một thiết bị sinh 8.640 dòng/ngày — nhật ký sẽ tốn chỗ hơn dữ liệu nó mô tả.
+Thiết bị chạy ổn định sinh **0 dòng**.
+
+Bảng `system_logs` không có policy insert/update/delete cho client: mọi lượt
+ghi đi qua `log_event()` (security definer) hoặc service role. Nhật ký chỉ có
+giá trị khi người dùng không tự sửa được nó.
+
+### 12.3 Cấu hình (bắt buộc, nếu không job đêm không chạy)
+
+```bash
+supabase db push                                  # áp 0018 + 0019
+supabase functions deploy archive-telemetry
+supabase secrets set MAINTENANCE_SHARED_SECRET=$(openssl rand -hex 32)
+```
+
+Rồi nạp URL + secret vào Vault để pg_cron gọi được Edge Function (SQL Editor):
+
+```sql
+select vault.create_secret(
+  'https://<project-ref>.supabase.co/functions/v1/archive-telemetry',
+  'archive_telemetry_url');
+select vault.create_secret('<MAINTENANCE_SHARED_SECRET vừa tạo>',
+  'archive_telemetry_key');
+```
+
+Đọc từ Vault chứ không nhúng khoá vào định nghĩa job vì `cron.job` là bảng đọc
+được — nhúng vào đó là để lộ khoá cho bất kỳ ai xem được bảng.
+
+Kiểm tra ba job đã lên lịch:
+
+```sql
+select jobname, schedule, active from cron.job;
+-- archive-telemetry        0 19 * * *   (02:00 giờ VN)
+-- purge-system-logs       20 19 * * *
+-- purge-telemetry-overdue 40 19 * * *
+```
+
+Biến môi trường tuỳ chọn: `ARCHIVE_STORAGE_BUDGET_BYTES` (mặc định 900 MB —
+chừa chỗ cho bucket `firmware` và `avatars` trong hạn mức 1 GB).
+
+### 12.4 Luồng lưu trữ
+
+```
+telemetry cũ hơn N ngày
+   │  (theo từng trạm, dùng index telemetry_station_ts_idx)
+   ▼
+gom theo THÁNG → CSV → gzip
+   ▼
+upload → bucket telemetry-archive (private)
+   │      <owner_id>/<station_id>/YYYY-MM/part-<epoch>-<rows>.csv.gz
+   ▼
+insert telemetry_archives (sổ theo dõi)
+   ▼
+delete_telemetry_rows(ids)   ← CHỈ những dòng đã lên Storage
+```
+
+**Thứ tự tải lên trước, xoá sau là điểm quan trọng nhất.** Nếu bước xoá hỏng,
+lần chạy sau lưu trữ lại đúng những dòng đó thành gói thứ hai — thừa dữ liệu
+trong kho lạnh, chứ không mất. Đảo thứ tự thì một lỗi mạng giữa chừng là mất hẳn.
+
+Một tháng có thể gồm **nhiều gói**: mỗi lượt chỉ xử lý một lô có giới hạn
+(20.000 dòng, tối đa 200.000 dòng hoặc 100 giây mỗi lần gọi). Ghép thành một
+file/tháng sẽ phải tải file cũ về, giải nén, nối, nén lại — với gói vài chục MB
+là hết bộ nhớ Edge Function.
+
+### 12.5 Hai cơ chế an toàn
+
+**Hết chỗ Storage** → dừng lưu trữ và **không xoá gì cả**, ghi log `error`.
+Xoá mà không lưu được chính là thứ người dùng đã tắt khi bật chế độ lưu trữ.
+
+**Lưới an toàn `purge_telemetry_overdue`** → nếu đường lưu trữ chết (chưa
+deploy, secret sai, Storage đầy), telemetry cũ hơn **hạn giữ + 30 ngày ân hạn**
+vẫn bị xoá, kèm log `error` mỗi lần. Đánh đổi có chủ đích: 30 ngày là quãng để
+nhận ra và sửa (log hiện ngay trên DevConsole), còn để database đầy thì mất
+toàn bộ dữ liệu đang tới. Muốn giữ lâu hơn thì tăng `p_grace_days` khi lên lịch
+lại job.
+
+### 12.6 Kiểm thử
+
+```bash
+supabase db push
+supabase functions deploy archive-telemetry
+```
+
+1. DevConsole → **Lưu trữ & dọn dữ liệu**: đặt "Giữ telemetry trong" = 7 ngày,
+   bật "Nén và lưu lên Storage", **Lưu cài đặt**.
+2. Bấm **Chạy dọn ngay**. Chưa có dữ liệu quá 7 ngày → "Không có bản ghi nào
+   quá hạn". Muốn thử thật, chèn dữ liệu cũ:
+   ```sql
+   insert into public.telemetry (device_id, station_id, owner_id, ts, solar_kw, battery_pct)
+   select device_id, station_id, owner_id, now() - interval '40 days', 1.5, 70
+   from public.telemetry limit 1;
+   ```
+3. Bấm lại **Chạy dọn ngay** → hiện số bản ghi đã nén + gói xuất hiện trong
+   "Gói đã lưu trữ", tải về giải nén ra CSV đọc được.
+4. **Nhật ký hệ thống** có dòng `INFO … Đã nén và lưu trữ …`.
+5. Tắt simulator, chờ 90 giây → nhật ký có dòng `ERROR Mất kết nối MQTT với …`;
+   bật lại → `INFO … kết nối MQTT thành công`.
+
+### 12.7 Lỗi thường gặp
+
+| Hiện tượng | Nguyên nhân |
+|---|---|
+| Nhật ký trống dù thiết bị đang chạy | Đúng như thiết kế — chỉ ghi khi trạng thái đổi. Tắt simulator 90 giây để thấy dòng đầu tiên. |
+| Log mới không tự hiện, phải F5 | Bảng chưa vào publication realtime: `alter publication supabase_realtime add table public.system_logs;` |
+| "Chạy dọn ngay" lỗi 401/404 | Chưa `supabase functions deploy archive-telemetry`. |
+| Job đêm không chạy nhưng nút bấm tay chạy được | Chưa nạp secret vào Vault (mục 12.3) — nút bấm tay dùng JWT người dùng, không cần Vault. |
+| Log `archive_storage_full` | Storage đã dùng >900 MB. Xoá bớt gói cũ trong "Gói đã lưu trữ". |
+| Log `telemetry_hard_purge` | Lưới an toàn đã phải xoá dữ liệu chưa lưu trữ được — đường lưu trữ đang hỏng, sửa ngay. |
 
 ## Ngoài phạm vi (làm sau)
 - Tự vô hiệu/xoá cert cũ khi "Tạo lại chứng chỉ" (mục 4.4) — hiện mỗi lần cấp

@@ -117,7 +117,7 @@ Deno.serve(async (req) => {
   // hãng khác, không nói giao thức OTA của ta).
   let deviceQuery = userClient
     .from("devices")
-    .select("id, name, aws_thing_name")
+    .select("id, name, aws_thing_name, station_id")
     .eq("type", "esp32");
   deviceQuery = device_id
     ? deviceQuery.eq("id", device_id)
@@ -198,6 +198,30 @@ Deno.serve(async (req) => {
   // được. Báo lỗi 500 ở đây sẽ khiến UI hiểu nhầm là "chưa đẩy gì cả", nên chỉ
   // log và vẫn trả ok kèm cảnh báo.
   if (updateErr) console.error("fw_status update failed:", updateErr.message);
+
+  // Nhật ký hệ thống (0018). Ghi ở đây là ghi "đã GỬI lệnh" — kết quả nạp thật
+  // sự do thiết bị báo về và được ingest-telemetry ghi tiếp thành ota_success /
+  // ota_failed. Hai dòng đó ghép lại chính là thứ cho biết một thiết bị đã im
+  // lặng nuốt mất bản cập nhật.
+  const logStationId = station_id ?? devices[0].station_id;
+  await admin.from("system_logs").insert({
+    owner_id: user.id,
+    station_id: logStationId,
+    device_id: device_id ?? null,
+    level: failedNames.length > 0 ? "warn" : "info",
+    source: "ota",
+    event: "ota_pushed",
+    message: failedNames.length > 0
+      ? `Đã gửi lệnh nạp firmware ${release.version} tới ${okIds.length} thiết bị; ` +
+        `${failedNames.length} thiết bị không gửi được: ${failedNames.join(", ")}`
+      : `Đã gửi lệnh nạp firmware ${release.version} tới ${okIds.length} thiết bị`,
+    meta: {
+      version: release.version,
+      board: release.board,
+      published: okIds.length,
+      failed: failedNames.length,
+    },
+  });
 
   return json({
     ok: true,
