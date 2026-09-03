@@ -13,6 +13,9 @@ dist-ssr
 *.local
 .env
 
+# Electron desktop app build output
+release
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -27,6 +30,7 @@ dist-ssr
 # My note
 error.txt
 note.txt
+info.txt
 
 # Firmware secrets / device certificates (never commit real keys)
 firmware/*
@@ -42,3 +46,6 @@ tools/mqtt-simulator/certs/
 # Bộ đếm boot của simulator (giả lập NVS của ESP32) — trạng thái cục bộ.
 tools/mqtt-simulator/.boot_count
 __pycache__/
+
+# Khoá VAPID sinh ra để nạp bằng `supabase secrets set --env-file` (chứa khoá RIÊNG)
+.vapid.env

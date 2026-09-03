@@ -27,6 +27,22 @@ DEVICE_KEY_PATH = "./certs/priv.key"
 # --- Chu kỳ gửi dữ liệu ---
 PUBLISH_INTERVAL_SECONDS = 10
 
+# --- Tuỳ chọn: cấu hình thiết bị tự khai (chỉ gửi ở bản tin đầu sau mỗi lần
+# kết nối, đúng như firmware) ---
+# SoftAP mà "ESP32" này phát (docs/IOT.md mục 9) → DevConsole → Cấu hình mạng.
+# Bỏ trống/xoá hai dòng này thì simulator không gửi, DevConsole sẽ hiện
+# "Thiết bị chưa báo cấu hình AP". SSID ≤ 32 byte, mật khẩu 8–63 ký tự, sai
+# giới hạn là ingest-telemetry bỏ qua kèm cảnh báo trong log.
+AP_SSID = ""
+AP_PASSWORD = ""
+
+# Phiên bản firmware "đang chạy" (mục 10) → DevConsole → Quản lý Firmware MCU.
+# Đặt trùng `version` của một hàng firmware_releases để thử luồng OTA phía
+# cloud. Lưu ý simulator KHÔNG mô phỏng việc nạp: lệnh "Đẩy OTA" chỉ được ghi
+# log, thiết bị sẽ nằm ở trạng thái 'pending' cho tới khi bạn sửa giá trị này
+# thành phiên bản vừa đẩy rồi chạy lại script.
+FW_VERSION = ""
+
 # --- Tải mà "ESP32 giả lập" này điều khiển (khớp firmware relays[]) ---
 # Khoá = loads.id (UUID) đã tạo ở Dashboard → Điều khiển tải → + Thêm tải,
 # với "Thiết bị điều khiển" chọn đúng thiết bị có aws_thing_name = THING_NAME

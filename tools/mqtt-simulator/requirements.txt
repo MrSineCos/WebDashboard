@@ -1,2 +1,4 @@
-paho-mqtt>=1.6,<2
+# simulate_esp32.py chạy được cả hai dòng: paho 2.x (constructor cần
+# CallbackAPIVersion, callback có thêm reason_code/properties) lẫn paho 1.6.
+paho-mqtt>=1.6
 boto3>=1.34

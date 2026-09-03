@@ -49,11 +49,9 @@ export default function ProtectedRoute({ children, requireAdmin = false }) {
 
   if (requireAdmin) {
     if (role !== 'admin') return <Navigate to="/" replace />;
-  } else if (role === 'admin' && location.pathname === '/' && !location.state?.fromDev && !new URLSearchParams(location.search).has('view')) {
+  } else if (role === 'admin' && location.pathname === '/' && !location.state?.fromDev) {
     // Default landing for admins is the Dev Console. They can still reach the
-    // user Dashboard on purpose via a link that carries state.fromDev, or via
-    // a `?view=` deep link — the OAuth redirect back from linking a Google
-    // identity uses the latter, and must not be bounced to the Dev Console.
+    // user Dashboard on purpose via a link that carries state.fromDev.
     return <Navigate to="/dev" replace />;
   }
 

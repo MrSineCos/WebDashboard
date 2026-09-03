@@ -1,13 +1,51 @@
 import { createContext, useContext, useEffect, useState } from 'react';
-import { isSupabaseConfigured, supabase } from './supabaseClient.js';
+import { isElectron, isSupabaseConfigured, supabase } from './supabaseClient.js';
 
 const AuthContext = createContext(null);
+
+// Hai phiên có nội dung y hệt nhau không?
+//
+// Cần đến hàm này vì supabase-js phát LẠI sự kiện `SIGNED_IN` mỗi lần cửa sổ
+// được focus trở lại: `_onVisibilityChanged` → `_recoverAndRefresh` đọc phiên
+// từ localStorage rồi báo cho mọi subscriber, kể cả khi chẳng có gì thay đổi.
+// Object đó là object MỚI sau mỗi lần đọc, nên nếu cứ setState thẳng thì `user`
+// đổi identity, mọi useEffect phụ thuộc `user` chạy lại, và toàn bộ dashboard
+// nháy về "Đang tải…" mỗi lần người dùng quay lại app.
+//
+// So sánh cả `user` chứ không chỉ access_token: đổi ảnh đại diện gọi
+// auth.updateUser, phát USER_UPDATED với CÙNG access_token nhưng user_metadata
+// mới — sự kiện đó phải render lại thì ảnh mới mới hiện ra.
+function isSameSession(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.access_token === b.access_token && JSON.stringify(a.user) === JSON.stringify(b.user);
+}
+
+// Mở trang đăng nhập của Google trong app Windows.
+//
+// Trên web, supabase-js tự chuyển hướng cả trang sang Google. Trong app thì
+// không được: cửa sổ app phải ở lại đúng chỗ (nó đang giữ code verifier của
+// PKCE trong localStorage) và Google cũng chặn đăng nhập trong webview nhúng.
+// Nên ta xin URL bằng `skipBrowserRedirect` rồi nhờ tiến trình chính mở nó
+// bằng trình duyệt hệ thống.
+async function startOAuthInElectron(request) {
+  const result = await request({
+    redirectTo: window.electron.authRedirectUrl,
+    skipBrowserRedirect: true,
+  });
+  if (result.data?.url) await window.electron.openExternal(result.data.url);
+  return result;
+}
 
 export function AuthProvider({ children }) {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(isSupabaseConfigured);
   const [fetchedRole, setFetchedRole] = useState(null);
   const [fetchedRoleUserId, setFetchedRoleUserId] = useState(null);
+  // Lỗi phát sinh SAU khi người dùng rời app sang trình duyệt (từ chối cấp
+  // quyền, đổi mã thất bại...). Không thể trả về từ chỗ bấm nút vì lúc đó
+  // hàm đã kết thúc từ lâu, nên để ở context cho trang đăng nhập đọc.
+  const [oauthError, setOauthError] = useState('');
 
   useEffect(() => {
     if (!isSupabaseConfigured) return;
@@ -18,10 +56,27 @@ export function AuthProvider({ children }) {
     });
 
     const { data: subscription } = supabase.auth.onAuthStateChange((_event, newSession) => {
-      setSession(newSession);
+      // Giữ nguyên object cũ khi nội dung không đổi — xem isSameSession.
+      setSession((prev) => (isSameSession(prev, newSession) ? prev : newSession));
     });
 
     return () => subscription.subscription.unsubscribe();
+  }, []);
+
+  // Nhận kết quả đăng nhập Google do tiến trình chính chuyển vào (app Windows).
+  // Việc đổi mã lấy phiên phải làm ở ĐÂY chứ không phải ở tiến trình chính:
+  // code verifier của PKCE nằm trong localStorage của chính cửa sổ này.
+  useEffect(() => {
+    if (!isSupabaseConfigured || !isElectron) return;
+    return window.electron.onOAuthCallback(async ({ code, error }) => {
+      if (error || !code) {
+        setOauthError(error || 'Không nhận được mã xác thực từ Google.');
+        return;
+      }
+      setOauthError('');
+      const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(code);
+      if (exchangeError) setOauthError(exchangeError.message);
+    });
   }, []);
 
   const userId = session?.user?.id ?? null;
@@ -59,50 +114,23 @@ export function AuthProvider({ children }) {
     role,
     roleLoading,
     isAdmin: role === 'admin',
-    async signIn(email, password) {
-      if (!isSupabaseConfigured) return notConfiguredError;
-      return supabase.auth.signInWithPassword({ email, password });
-    },
-    async signUp(email, password, fullName) {
-      if (!isSupabaseConfigured) return notConfiguredError;
-      return supabase.auth.signUp({
-        email,
-        password,
-        options: { data: { full_name: fullName } },
-      });
-    },
+    isElectron,
+    oauthError,
     async signOut() {
       if (!isSupabaseConfigured) return notConfiguredError;
       return supabase.auth.signOut();
     },
     async signInWithGoogle() {
       if (!isSupabaseConfigured) return notConfiguredError;
+      setOauthError('');
+      if (isElectron) {
+        return startOAuthInElectron((options) =>
+          supabase.auth.signInWithOAuth({ provider: 'google', options }));
+      }
       return supabase.auth.signInWithOAuth({
         provider: 'google',
         options: { redirectTo: window.location.origin },
       });
-    },
-    // --- Liên kết nhiều phương thức đăng nhập vào cùng 1 tài khoản ---
-    // Cả linkIdentity lẫn unlinkIdentity đều yêu cầu bật "Enable Manual
-    // Linking" trong Supabase (Authentication → Providers). Chưa bật thì
-    // GoTrue trả lỗi "Manual linking is disabled" — UI dịch lỗi này ra
-    // tiếng Việt thay vì hiện nguyên văn.
-    async listIdentities() {
-      if (!isSupabaseConfigured) return notConfiguredError;
-      return supabase.auth.getUserIdentities();
-    },
-    async linkGoogle() {
-      if (!isSupabaseConfigured) return notConfiguredError;
-      // redirectTo quay lại đúng trang cài đặt để người dùng thấy kết quả
-      // liên kết ngay, thay vì rơi về Dashboard mặc định.
-      return supabase.auth.linkIdentity({
-        provider: 'google',
-        options: { redirectTo: `${window.location.origin}/?view=settings` },
-      });
-    },
-    async unlinkIdentity(identity) {
-      if (!isSupabaseConfigured) return notConfiguredError;
-      return supabase.auth.unlinkIdentity(identity);
     },
   };
 

@@ -90,7 +90,6 @@ const COLUMN_ORDER = [
   "temp_c",
   "rssi",
   "uptime_s",
-  "mcu_temp_c",
   "boot_count",
   "charge_enabled",
   "discharge_enabled",

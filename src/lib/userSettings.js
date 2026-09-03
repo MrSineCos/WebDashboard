@@ -33,18 +33,21 @@ async function pushBatteryConfig(stationId, mode) {
 //   via useDevices().)
 export function useUserSettings(stationId) {
   const { user } = useAuth();
+  // Xem chú thích ở useTelemetry (lib/telemetry.js): effect bám vào user.id để
+  // không tải lại mỗi lần object `user` đổi identity.
+  const userId = user?.id ?? null;
   const [userSettings, setUserSettings] = useState(null);
   const [userLoading, setUserLoading] = useState(true);
   const [stationSettings, setStationSettings] = useState(null);
   const [stationLoading, setStationLoading] = useState(true);
 
   useEffect(() => {
-    if (!user) return;
+    if (!userId) return;
     let cancelled = false;
     supabase
       .from('user_settings')
-      .select('notif_prefs')
-      .eq('owner_id', user.id)
+      .select('notif_prefs, telemetry_retention_days, energy_unit')
+      .eq('owner_id', userId)
       .maybeSingle()
       .then(({ data }) => {
         if (cancelled) return;
@@ -54,10 +57,10 @@ export function useUserSettings(stationId) {
     return () => {
       cancelled = true;
     };
-  }, [user]);
+  }, [userId]);
 
   useEffect(() => {
-    if (!user || !stationId) {
+    if (!userId || !stationId) {
       setStationSettings(null);
       setStationLoading(true);
       return;
@@ -66,9 +69,9 @@ export function useUserSettings(stationId) {
     setStationLoading(true);
     supabase
       .from('station_settings')
-      .select('battery_modes, active_battery_mode, module_visibility')
+      .select('battery_modes, active_battery_mode, module_visibility, alert_thresholds')
       .eq('station_id', stationId)
-      .eq('owner_id', user.id)
+      .eq('owner_id', userId)
       .maybeSingle()
       .then(({ data }) => {
         if (cancelled) return;
@@ -78,7 +81,7 @@ export function useUserSettings(stationId) {
     return () => {
       cancelled = true;
     };
-  }, [user, stationId]);
+  }, [userId, stationId]);
 
   async function patch(fields) {
     setUserSettings((prev) => (prev ? { ...prev, ...fields } : prev));
@@ -94,6 +97,19 @@ export function useUserSettings(stationId) {
 
   const moduleVisibility = stationSettings?.module_visibility ?? {};
   const notifPrefs = userSettings?.notif_prefs ?? {};
+  // Số ngày telemetry còn được giữ trong database (DevConsole → Lưu trữ & dọn
+  // dữ liệu). Trang Báo cáo lấy đây làm độ rộng khung ngày để chỉ cho chọn
+  // những ngày thực sự còn dữ liệu. Mặc định 30 khớp default của cột ở DB.
+  const telemetryRetentionDays = userSettings?.telemetry_retention_days ?? 30;
+  // Đơn vị hiển thị năng lượng (Cài đặt → Đơn vị đo lường, migration 0021) —
+  // đổi cách HIỂN THỊ các con số kWh trên Dashboard/Pin lưu trữ/Báo cáo, không
+  // đổi đơn vị tính ở nguồn (DB luôn lưu kWh). Xem lib/stations.js fmtEnergy().
+  const energyUnit = userSettings?.energy_unit ?? 'kWh';
+  // Ngưỡng để database coi trạm là bất thường và mở một cảnh báo (migration
+  // 0023). Giá trị null cho một khoá = TẮT kiểm tra đó, khác với "chưa cấu
+  // hình" — vì vậy KHÔNG dùng `??` để chèn số mặc định cho từng khoá ở đây,
+  // làm vậy sẽ bật lại đúng kiểm tra mà người dùng vừa tắt đi.
+  const alertThresholds = stationSettings?.alert_thresholds ?? {};
 
   return {
     loading: userLoading || stationLoading,
@@ -101,6 +117,18 @@ export function useUserSettings(stationId) {
     activeBatteryMode: stationSettings?.active_battery_mode ?? 'balanced',
     moduleVisibility,
     notifPrefs,
+    telemetryRetentionDays,
+    energyUnit,
+    alertThresholds,
+    // Ghi cả object thay vì từng khoá: form "Ngưỡng cảnh báo" lưu một lần cho
+    // cả ba ô, và ghi đè trọn vẹn thì không có trạng thái nửa vời khi một khoá
+    // được xoá (chuyển thành null = tắt kiểm tra).
+    async updateAlertThresholds(next) {
+      await stationPatch({ alert_thresholds: next });
+    },
+    async setEnergyUnit(unit) {
+      await patch({ energy_unit: unit });
+    },
     async updateBatteryModes(nextBatteryModes) {
       await stationPatch({ battery_modes: nextBatteryModes });
       // Ngưỡng của mode đang chọn có thể vừa đổi → đẩy lại xuống thiết bị.
@@ -118,6 +146,13 @@ export function useUserSettings(stationId) {
     },
     async toggleNotifPref(id) {
       await patch({ notif_prefs: { ...notifPrefs, [id]: !notifPrefs[id] } });
+    },
+    // Đặt một khoá về giá trị cụ thể thay vì lật. Công tắc "Thông báo đẩy" cần
+    // cái này: trạng thái thật của nó là việc trình duyệt có đăng ký hay không
+    // (lib/push.js), nên sau khi đăng ký/huỷ xong mới ghi lại đúng kết quả — lật
+    // mù sẽ lệch khi người dùng từ chối cấp quyền giữa chừng.
+    async setNotifPref(id, value) {
+      await patch({ notif_prefs: { ...notifPrefs, [id]: value } });
     },
     // Ghi đè battery_modes/module_visibility của TẤT CẢ trạm thuộc user này
     // trong 1 round-trip — nhận giá trị hiện tại làm tham số (không đọc lại

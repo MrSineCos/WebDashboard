@@ -34,13 +34,18 @@ const NUMERIC_FIELDS = [
   "load_w",
   "temp_c",
   "rssi",
-  // Hardware diagnostics (migration 0017). `mcu_temp_c` is the MCU core
-  // temperature and is deliberately NOT the same column as `temp_c`, which is
-  // the battery pack temperature the Battery page reads.
+  // Hardware diagnostics (migration 0017). Note `temp_c` above is the battery
+  // pack temperature the Battery page reads — a different quantity.
   "uptime_s",
-  "mcu_temp_c",
   "boot_count",
 ] as const;
+
+// Reported by devices but deliberately not stored anywhere (migration 0029
+// dropped the column). Listed here — rather than just left out — so that units
+// still running pre-0029 firmware have the field DISCARDED instead of quietly
+// piling up inside `extra`, which is a jsonb column written every 10 seconds.
+// Remove an entry once no device in the field can still send it.
+const IGNORED_FIELDS = ["mcu_temp_c"] as const;
 
 // integer/bigint columns. PostgREST rejects a JSON value with a decimal point
 // outright (no implicit rounding), so a device reporting e.g. 69.9 for an
@@ -146,6 +151,37 @@ async function logEvent(
   if (error) console.error("system_logs insert failed:", error.message);
 }
 
+// Biến thể có chặn tần suất (migration 0030 mục 2), cho những sự kiện mà THIẾT
+// BỊ quyết định tần suất chứ không phải ta: firmware hỏng gửi sai định dạng
+// hoặc gửi số âm thì nó gửi lại đúng như thế mỗi 10 giây. Ghi thẳng là 8.640
+// dòng/ngày cho một thiết bị hỏng, đẩy mọi sự kiện khác ra khỏi tầm nhìn.
+//
+// Cửa sổ mặc định 60 phút: đủ thưa để nhật ký còn đọc được, đủ dày để một lỗi
+// kéo dài vẫn hiện lại đều đặn thay vì chỉ có đúng một dòng từ hôm kia.
+async function logEventThrottled(
+  ownerId: string,
+  stationId: string | null,
+  deviceId: string | null,
+  level: "info" | "warn" | "error",
+  event: string,
+  message: string,
+  meta: Record<string, unknown> = {},
+  windowMinutes = 60,
+) {
+  const { error } = await admin.rpc("log_event_throttled", {
+    p_owner_id: ownerId,
+    p_level: level,
+    p_event: event,
+    p_message: message,
+    p_station_id: stationId,
+    p_device_id: deviceId,
+    p_meta: meta,
+    p_source: "ingest",
+    p_window: `${windowMinutes} minutes`,
+  });
+  if (error) console.error("log_event_throttled failed:", error.message);
+}
+
 Deno.serve(async (req) => {
   if (req.method !== "POST") {
     return json({ error: "method_not_allowed" }, 405);
@@ -217,6 +253,11 @@ Deno.serve(async (req) => {
     row.ts = tsRaw;
   }
 
+  // Trường bị loại vì sai định dạng/giá trị. Gom lại rồi ghi MỘT dòng nhật ký
+  // sau vòng lặp: firmware hỏng thường sai vài trường cùng lúc, và ba dòng nói
+  // về cùng một bản tin thì khó đọc hơn một dòng liệt kê cả ba.
+  const rejected: string[] = [];
+
   for (const field of NUMERIC_FIELDS) {
     const v = payload[field];
     if (typeof v !== "number") continue;
@@ -224,6 +265,7 @@ Deno.serve(async (req) => {
       // Same policy as the AP/firmware reports below: one bad diagnostic field
       // is worth a log, not a 500 that drops the whole reading.
       console.warn(`ignoring negative ${field} from ${clientId}`);
+      rejected.push(`${field}=${v} (âm)`);
       continue;
     }
     row[field] = INTEGER_FIELDS.has(field) ? Math.round(v) : v;
@@ -247,6 +289,7 @@ Deno.serve(async (req) => {
     ...NUMERIC_FIELDS,
     ...BOOL_FIELDS,
     ...STRING_FIELDS,
+    ...IGNORED_FIELDS,
   ]);
   const extra: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(payload)) {
@@ -257,7 +300,35 @@ Deno.serve(async (req) => {
   // 5. Insert. The `telemetry_apply` trigger updates stations + devices.
   const { error: insertErr } = await admin.from("telemetry").insert(row);
   if (insertErr) {
+    // Đây là mất DỮ LIỆU MỚI, loại sự cố nặng nhất của hệ thống này (database
+    // đầy, trường sai kiểu, RLS/schema lệch sau một migration hỏng) — và cho
+    // tới giờ nó chỉ trả 500 về cho AWS IoT rồi biến mất khỏi mọi nơi người
+    // dùng nhìn thấy. AWS thử lại rồi bỏ cuộc, còn dashboard thì chỉ im lặng
+    // thiếu dữ liệu.
+    //
+    // Chặn tần suất 15 phút: nguyên nhân phổ biến nhất (database đầy) làm MỌI
+    // bản tin của MỌI thiết bị lỗi cùng lúc, nên nếu ghi thẳng thì chính lúc
+    // cần đọc nhật ký nhất lại là lúc nó bị ngập.
+    await logEventThrottled(
+      device.owner_id, device.station_id, device.id,
+      "error", "telemetry_insert_failed",
+      `Không ghi được dữ liệu từ ${device.name} vào database: ${insertErr.message}. ` +
+        `Dữ liệu của bản tin này đã mất — kiểm tra dung lượng database ở mục ` +
+        `"Lưu trữ & dọn dữ liệu".`,
+      { detail: insertErr.message, client_id: clientId },
+      15,
+    );
     return json({ error: "insert_failed", detail: insertErr.message }, 500);
+  }
+
+  if (rejected.length > 0) {
+    await logEventThrottled(
+      device.owner_id, device.station_id, device.id,
+      "warn", "telemetry_field_rejected",
+      `Bỏ qua ${rejected.length} trường sai giá trị trong bản tin từ ${device.name}: ` +
+        `${rejected.join(", ")}. Phần còn lại của bản tin vẫn được ghi nhận.`,
+      { fields: rejected, client_id: clientId },
+    );
   }
 
   // 6. Optional load-state ack: firmware that switches relays for one or
@@ -290,6 +361,18 @@ Deno.serve(async (req) => {
       // Don't fail the whole request — telemetry already landed and is the
       // more important payload; a bad AP report is worth a log, not a 500.
       console.warn(`ignoring invalid ap report from ${clientId}`);
+      // Hậu quả thật của việc bỏ qua: mục "Cấu hình điểm phát WiFi" tiếp tục
+      // hiện SSID/mật khẩu CŨ, người dùng mang thông tin đó ra hiện trường và
+      // không kết nối được vào thiết bị. Nên đây là dòng nhật ký cần có, không
+      // phải chi tiết nội bộ.
+      await logEventThrottled(
+        device.owner_id, device.station_id, device.id,
+        "warn", "ap_report_rejected",
+        `${device.name} báo thông tin điểm phát WiFi không hợp lệ (SSID tối đa ` +
+          `${AP_SSID_MAX_BYTES} byte, mật khẩu ${AP_PASSWORD_MIN}–${AP_PASSWORD_MAX} ký tự) ` +
+          `— dashboard vẫn đang hiển thị thông tin cũ.`,
+        { client_id: clientId },
+      );
     } else if (ssid !== device.ap_ssid || password !== device.ap_password) {
       await admin
         .from("devices")
@@ -319,6 +402,17 @@ Deno.serve(async (req) => {
         // Same policy as the AP report: telemetry already landed and matters
         // more, so a garbage version is worth a log, not a 500.
         console.warn(`ignoring invalid fw_version from ${clientId}`);
+        // Đáng ghi vì phiên bản là thứ quyết định OTA có được coi là xong hay
+        // không (mục 8 bên dưới): firmware báo sai định dạng thì lần nạp nào
+        // cũng treo ở 'downloading' mãi mà không ai hiểu vì sao.
+        await logEventThrottled(
+          device.owner_id, device.station_id, device.id,
+          "warn", "fw_report_rejected",
+          `${device.name} báo phiên bản firmware không hợp lệ (rỗng hoặc dài quá ` +
+            `${FW_VERSION_MAX} ký tự) — dashboard vẫn ghi nhận phiên bản cũ ` +
+            `${device.fw_version ?? "chưa rõ"}.`,
+          { client_id: clientId },
+        );
       } else if (version !== device.fw_version) {
         // Only on change — a device republishes its version on every
         // reconnect, and `fw_reported_at` is more useful as "when this build
@@ -332,6 +426,14 @@ Deno.serve(async (req) => {
       const status = payload.fw_status;
       if (typeof status !== "string" || !DEVICE_FW_STATUSES.has(status)) {
         console.warn(`ignoring invalid fw_status from ${clientId}`);
+        await logEventThrottled(
+          device.owner_id, device.station_id, device.id,
+          "warn", "fw_report_rejected",
+          `${device.name} báo trạng thái nạp firmware không hợp lệ ` +
+            `("${String(status).slice(0, 40)}") — tiến trình OTA trên dashboard ` +
+            `sẽ không cập nhật theo bản tin này.`,
+          { client_id: clientId, reported: String(status).slice(0, 80) },
+        );
       } else {
         patch.fw_status = status;
         patch.fw_status_at = now;

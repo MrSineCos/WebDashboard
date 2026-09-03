@@ -2,33 +2,28 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import AppShell from '../components/AppShell.jsx';
 import { useIsMobile } from '../lib/useIsMobile.js';
-import { useStationSelector } from '../lib/stations.js';
+import { useStationSelector, fmtCycles, fmtEnergy, DEFAULT_PACK_CAPACITY_KWH } from '../lib/stations.js';
 import { useDailyEnergy, useHourlyEnergy } from '../lib/telemetry.js';
 import { useUserSettings } from '../lib/userSettings.js';
+import { toCsv, downloadCsv, slugify } from '../lib/csv.js';
+import { tzDayWindow } from '../lib/time.js';
 
 const BLUE = 'oklch(54% 0.15 240)';
 
-const DAYS_WINDOW = 14;
 const VN_DOW = ['CN', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7'];
 const TICK_HOURS = [0, 3, 6, 9, 12, 15, 18, 21];
 
-// Khung 14 ngày gần nhất (kể cả hôm nay), dùng làm khung trục cho biểu đồ
-// ngay cả khi station_daily_energy chưa có dữ liệu cho một số ngày.
-function buildDayWindow(n) {
-  const days = [];
-  const today = new Date();
-  for (let i = n - 1; i >= 0; i--) {
-    const d = new Date(today);
-    d.setDate(d.getDate() - i);
-    const iso = d.toISOString().slice(0, 10);
-    days.push({
-      iso,
-      year: d.getFullYear(),
-      date: `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}`,
-      day: VN_DOW[d.getDay()],
-    });
-  }
-  return days;
+// Khung `n` ngày gần nhất (kể cả hôm nay) theo lịch của TRẠM, dùng làm khung
+// trục cho biểu đồ ngay cả khi station_daily_energy chưa có dữ liệu cho một
+// số ngày. Ngày phải cùng múi giờ với p_tz của RPC, nếu không cột "hôm nay"
+// sẽ đi tìm một ngày mà RPC không hề trả về.
+//
+// Bản cũ dựng khung bằng Date cục bộ rồi lấy iso qua toISOString() — trộn hai
+// múi giờ trong cùng một phép tính: getDate() theo trình duyệt còn
+// toISOString() theo UTC, nên từ 00:00 đến 07:00 giờ Việt Nam mọi ngày trong
+// khung đều bị lùi một ngày.
+function buildDayWindow(n, tz) {
+  return tzDayWindow(n, tz).map((d) => ({ ...d, day: VN_DOW[d.dow] }));
 }
 
 function buildPath(values, w, h, padTop, padBottom, xOffset = 0) {
@@ -50,24 +45,44 @@ export default function Reports() {
   const navigate = useNavigate();
   const isMobile = useIsMobile(900);
   const { station, stationColor, stationOptions, stationMenuOpen, toggleStationMenu, closeStationMenu, loading: stationLoading } = useStationSelector();
-  const { rows: dailyRows } = useDailyEnergy(station?.id, DAYS_WINDOW);
   const settings = useUserSettings(station?.id);
+  // Khung ngày bám theo retention telemetry cấu hình trong DevConsole. Trước
+  // đây cố định 14 ngày, nên dù DB còn giữ 30 ngày người dùng vẫn không chọn
+  // xem được những ngày cũ hơn. Chờ settings tải xong mới gọi RPC để khỏi
+  // fetch thừa một lần với độ rộng mặc định.
+  const daysWindow = settings.telemetryRetentionDays;
+  // Múi giờ của trạm (migration 0021) — dùng chung cho khung ngày dựng ở client
+  // và cho ranh giới ngày/giờ mà hai RPC năng lượng cắt theo (0022). Hai bên
+  // phải khớp nhau, xem chú thích useHourlyEnergy.
+  const stationTz = station?.timezone;
+  const { rows: dailyRows } = useDailyEnergy(settings.loading ? null : station?.id, daysWindow, stationTz);
 
-  const [selectedIndex, setSelectedIndex] = useState(DAYS_WINDOW - 1);
+  // Lưu ngày đang chọn theo chuỗi ISO chứ không theo chỉ số: độ rộng khung có
+  // thể thay đổi (đổi retention), lúc đó chỉ số cũ sẽ trỏ sang một ngày khác.
+  // null = ngày mới nhất trong khung.
+  const [selectedIso, setSelectedIso] = useState(null);
   const [hoverIdx, setHoverIdx] = useState(null);
 
-  // Derived from dailyRows/selectedIndex only (not `station`), so these can
+  // Derived from dailyRows/selectedIso only (not `station`), so these can
   // run before the loading guard below — needed because useHourlyEnergy must
   // be called unconditionally on every render (rules-of-hooks).
-  const dayWindow = buildDayWindow(DAYS_WINDOW);
+  const dayWindow = buildDayWindow(daysWindow, stationTz);
   const dailyMap = new Map(dailyRows.map((r) => [r.day, r]));
   const scaledDaily = dayWindow.map((d) => {
     const row = dailyMap.get(d.iso);
-    return { ...d, kwh: +(row?.solarKwh ?? 0).toFixed(1), loadKwh: +(row?.loadKwh ?? 0).toFixed(1) };
+    return {
+      ...d,
+      kwh: +(row?.solarKwh ?? 0).toFixed(1),
+      loadKwh: +(row?.loadKwh ?? 0).toFixed(1),
+      chargeKwh: row?.chargeKwh ?? 0,
+      dischargeKwh: row?.dischargeKwh ?? 0,
+    };
   });
-  const selIdx = Math.min(selectedIndex, scaledDaily.length - 1);
+  // Ngày đã chọn rơi ra ngoài khung (retention bị giảm) → quay về ngày mới nhất.
+  const foundIdx = selectedIso ? scaledDaily.findIndex((d) => d.iso === selectedIso) : -1;
+  const selIdx = foundIdx >= 0 ? foundIdx : scaledDaily.length - 1;
   const selectedDay = scaledDaily[selIdx];
-  const { rows: hourlyRows } = useHourlyEnergy(station?.id, selectedDay.iso);
+  const { rows: hourlyRows } = useHourlyEnergy(station?.id, selectedDay.iso, stationTz);
 
   function onNavigate(id) {
     if (id === 'reports') return;
@@ -98,6 +113,11 @@ export default function Reports() {
     );
   }
 
+  // Chu kỳ quy đổi của riêng ngày đang chọn — cùng công thức EFC với bộ đếm
+  // tích luỹ ở trang Pin lưu trữ (migration 0020), chỉ khác phạm vi cộng dồn.
+  const packCapacityKwh = station.batteryCapacityKwh ?? DEFAULT_PACK_CAPACITY_KWH;
+  const dayCycles = (selectedDay.chargeKwh + selectedDay.dischargeKwh) / (2 * packCapacityKwh);
+
   const kwhValues = scaledDaily.map((d) => d.kwh);
   const maxKwh = Math.max(...kwhValues);
   const minKwh = Math.min(...kwhValues);
@@ -107,17 +127,32 @@ export default function Reports() {
   const minDay = scaledDaily.find((d) => d.kwh === minKwh);
   const maxKwhSafe = maxKwh || 1;
 
+  // Hiển thị theo đơn vị người dùng chọn (Cài đặt → Đơn vị đo lường) — các
+  // biến kWh gốc ở trên vẫn giữ nguyên cho tính toán (delta %, thang biểu đồ),
+  // chỉ đổi cách IN ra ở thẻ tổng quan/chi tiết ngày/CSV.
+  const totalEnergy = fmtEnergy(totalKwh, settings.energyUnit);
+  const avgEnergy = fmtEnergy(avgKwh, settings.energyUnit);
+  const maxEnergy = fmtEnergy(maxKwh, settings.energyUnit);
+  const minEnergy = fmtEnergy(minKwh, settings.energyUnit);
+  const selectedDayEnergy = fmtEnergy(selectedDay.kwh, settings.energyUnit);
+  const selectedDayLoadEnergy = fmtEnergy(selectedDay.loadKwh, settings.energyUnit);
+
   const prevDay = selIdx > 0 ? scaledDaily[selIdx - 1] : null;
   const deltaPct = prevDay && prevDay.kwh > 0 ? Math.round(((selectedDay.kwh - prevDay.kwh) / prevDay.kwh) * 100) : null;
 
+  // Ở đơn vị Wh con số dài hơn hẳn (12,3 → 12.300) nên cột phải rộng ra, nếu
+  // không các nhãn liền nhau sẽ chồng lên nhau. Chiều cao cột vẫn tính từ kWh
+  // gốc — đổi đơn vị chỉ nhân/chia 1000 nên tỉ lệ giữa các cột không đổi.
+  const isWh = settings.energyUnit === 'Wh';
   const dailyBars = scaledDaily.map((d, i) => ({
     ...d,
+    energyLabel: fmtEnergy(d.kwh, settings.energyUnit).value,
     barStyle: {
       width: '100%', maxWidth: '26px', borderRadius: '5px 5px 2px 2px',
       height: Math.max(6, (d.kwh / maxKwhSafe) * 108) + 'px',
       background: i === selIdx ? BLUE : 'oklch(54% 0.15 240 / 0.35)',
     },
-    labelStyle: { fontFamily: "'IBM Plex Mono',monospace", fontSize: '10.5px', color: i === selIdx ? 'oklch(24% 0.03 240)' : 'oklch(58% 0.02 240)', fontWeight: i === selIdx ? 700 : 400 },
+    labelStyle: { fontFamily: "'IBM Plex Mono',monospace", fontSize: '10.5px', whiteSpace: 'nowrap', color: i === selIdx ? 'oklch(24% 0.03 240)' : 'oklch(58% 0.02 240)', fontWeight: i === selIdx ? 700 : 400 },
     dayLabelStyle: { fontSize: '11px', color: i === selIdx ? 'oklch(24% 0.03 240)' : 'oklch(58% 0.02 240)', fontWeight: i === selIdx ? 700 : 500 },
   }));
 
@@ -190,8 +225,57 @@ export default function Reports() {
   }
 
   function onDateInputChange(e) {
-    const idx = dayWindow.findIndex((d) => d.iso === e.target.value);
-    if (idx >= 0) setSelectedIndex(idx);
+    if (dayWindow.some((d) => d.iso === e.target.value)) setSelectedIso(e.target.value);
+  }
+
+  // Xuất đúng những gì đang hiển thị trên trang: tổng quan 14 ngày, bảng sản
+  // lượng theo ngày, và chi tiết theo giờ của ngày đang chọn. Gom vào một file
+  // nhiều khối (mỗi khối có dòng tiêu đề riêng, ngăn nhau bằng dòng trống).
+  function onExportCsv() {
+    const firstDay = scaledDaily[0];
+    const lastDay = scaledDaily[scaledDaily.length - 1];
+    const fullDate = (d) => `${d.date}/${d.year}`;
+
+    const rows = [
+      ['Báo cáo hiệu suất'],
+      ['Trạm', station.name],
+      ['Vị trí', station.location],
+      ['Khoảng thời gian', `${fullDate(firstDay)} - ${fullDate(lastDay)}`],
+      ['Xuất lúc', new Date().toLocaleString('vi-VN', { timeZone: station.timezone })],
+      [],
+      [`Tổng quan ${daysWindow} ngày`],
+      ['Chỉ số', 'Giá trị', 'Đơn vị', 'Ngày'],
+      ['Tổng sản lượng', totalEnergy.value, totalEnergy.unit, ''],
+      ['Trung bình mỗi ngày', avgEnergy.value, avgEnergy.unit, ''],
+      ['Ngày cao nhất', maxEnergy.value, maxEnergy.unit, fullDate(maxDay)],
+      ['Ngày thấp nhất', minEnergy.value, minEnergy.unit, fullDate(minDay)],
+      [],
+      ['Sản lượng theo ngày'],
+      [`Ngày`, 'Thứ', `Sản lượng PV (${settings.energyUnit})`, `Tải tiêu thụ (${settings.energyUnit})`],
+      ...scaledDaily.map((d) => [d.iso, d.day, fmtEnergy(d.kwh, settings.energyUnit).value, fmtEnergy(d.loadKwh, settings.energyUnit).value]),
+      [],
+      [`Chi tiết ngày ${fullDate(selectedDay)}`],
+    ];
+
+    if (hasHourly) {
+      rows.push(['Giờ', 'Công suất PV TB (W)', 'Công suất tải TB (W)', 'Điện áp pin TB (V)']);
+      for (let h = 0; h < 24; h++) {
+        const r = hourlyMap.get(h);
+        rows.push([
+          `${String(h).padStart(2, '0')}:00`,
+          r?.avgSolarW == null ? '' : Math.round(r.avgSolarW),
+          r?.avgLoadW == null ? '' : Math.round(r.avgLoadW),
+          r?.avgBatteryVoltage == null ? '' : r.avgBatteryVoltage.toFixed(1),
+        ]);
+      }
+      rows.push([], ['Giờ sản lượng cao nhất', peakHourLabel]);
+      rows.push(['Điện áp trung bình (V)', avgVoltage == null ? '' : avgVoltage.toFixed(1)]);
+    } else {
+      rows.push(['Chưa có dữ liệu telemetry cho ngày này']);
+    }
+
+    const name = `bao-cao-${slugify(station.name)}-${selectedDay.iso}.csv`;
+    downloadCsv(name, toCsv(rows));
   }
 
   const deltaLabel = deltaPct === null ? '' : deltaPct >= 0 ? `↑ ${deltaPct}% so với ngày trước` : `↓ ${Math.abs(deltaPct)}% so với ngày trước`;
@@ -217,27 +301,27 @@ export default function Reports() {
           <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '26px', fontWeight: 700, margin: '0 0 4px', color: 'oklch(20% 0.03 240)' }}>Báo cáo hiệu suất</h1>
           <div style={{ fontSize: '13.5px', color: 'oklch(50% 0.02 240)' }}>{station.name} · {station.location}</div>
         </div>
-        <button style={{ padding: '10px 18px', borderRadius: '9px', border: '1px solid oklch(88% 0.01 240)', background: 'white', fontSize: '13px', fontWeight: 600, color: 'oklch(30% 0.03 240)', cursor: 'pointer' }}>Xuất báo cáo CSV</button>
+        <button type="button" onClick={onExportCsv} style={{ padding: '10px 18px', borderRadius: '9px', border: '1px solid oklch(88% 0.01 240)', background: 'white', fontSize: '13px', fontWeight: 600, color: 'oklch(30% 0.03 240)', cursor: 'pointer' }}>Xuất báo cáo CSV</button>
       </div>
 
       {/* PERIOD SUMMARY */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px,1fr))', gap: '16px', marginBottom: '20px' }}>
         <div style={{ background: 'white', border: '1px solid oklch(91% 0.01 240)', borderRadius: '14px', padding: '20px', boxShadow: '0 1px 2px oklch(0% 0 0 / 0.04)' }}>
-          <div style={{ fontSize: '13px', color: 'oklch(52% 0.02 240)', fontWeight: 600, marginBottom: '12px' }}>Tổng sản lượng (14 ngày)</div>
-          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '24px', fontWeight: 500 }}>{totalKwh.toFixed(1)} <span style={{ fontSize: '14px', color: 'oklch(55% 0.02 240)' }}>kWh</span></div>
+          <div style={{ fontSize: '13px', color: 'oklch(52% 0.02 240)', fontWeight: 600, marginBottom: '12px' }}>Tổng sản lượng ({daysWindow} ngày)</div>
+          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '24px', fontWeight: 500 }}>{totalEnergy.value} <span style={{ fontSize: '14px', color: 'oklch(55% 0.02 240)' }}>{totalEnergy.unit}</span></div>
         </div>
         <div style={{ background: 'white', border: '1px solid oklch(91% 0.01 240)', borderRadius: '14px', padding: '20px', boxShadow: '0 1px 2px oklch(0% 0 0 / 0.04)' }}>
           <div style={{ fontSize: '13px', color: 'oklch(52% 0.02 240)', fontWeight: 600, marginBottom: '12px' }}>Trung bình / ngày</div>
-          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '24px', fontWeight: 500 }}>{avgKwh.toFixed(1)} <span style={{ fontSize: '14px', color: 'oklch(55% 0.02 240)' }}>kWh</span></div>
+          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '24px', fontWeight: 500 }}>{avgEnergy.value} <span style={{ fontSize: '14px', color: 'oklch(55% 0.02 240)' }}>{avgEnergy.unit}</span></div>
         </div>
         <div style={{ background: 'white', border: '1px solid oklch(91% 0.01 240)', borderRadius: '14px', padding: '20px', boxShadow: '0 1px 2px oklch(0% 0 0 / 0.04)' }}>
           <div style={{ fontSize: '13px', color: 'oklch(52% 0.02 240)', fontWeight: 600, marginBottom: '12px' }}>Ngày cao nhất</div>
-          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '24px', fontWeight: 500, color: 'oklch(64% 0.15 150)' }}>{maxKwh.toFixed(1)} <span style={{ fontSize: '14px', color: 'oklch(55% 0.02 240)' }}>kWh</span></div>
+          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '24px', fontWeight: 500, color: 'oklch(64% 0.15 150)' }}>{maxEnergy.value} <span style={{ fontSize: '14px', color: 'oklch(55% 0.02 240)' }}>{maxEnergy.unit}</span></div>
           <div style={{ fontSize: '12px', color: 'oklch(52% 0.02 240)', marginTop: '4px' }}>{maxDay.date}</div>
         </div>
         <div style={{ background: 'white', border: '1px solid oklch(91% 0.01 240)', borderRadius: '14px', padding: '20px', boxShadow: '0 1px 2px oklch(0% 0 0 / 0.04)' }}>
           <div style={{ fontSize: '13px', color: 'oklch(52% 0.02 240)', fontWeight: 600, marginBottom: '12px' }}>Ngày thấp nhất</div>
-          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '24px', fontWeight: 500, color: 'oklch(58% 0.19 25)' }}>{minKwh.toFixed(1)} <span style={{ fontSize: '14px', color: 'oklch(55% 0.02 240)' }}>kWh</span></div>
+          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '24px', fontWeight: 500, color: 'oklch(58% 0.19 25)' }}>{minEnergy.value} <span style={{ fontSize: '14px', color: 'oklch(55% 0.02 240)' }}>{minEnergy.unit}</span></div>
           <div style={{ fontSize: '12px', color: 'oklch(52% 0.02 240)', marginTop: '4px' }}>{minDay.date}</div>
         </div>
       </div>
@@ -252,9 +336,9 @@ export default function Reports() {
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: '6px', height: '184px', overflowX: 'auto', overflowY: 'visible', padding: '14px 4px 6px', boxSizing: 'border-box' }}>
-          {dailyBars.map((item, i) => (
-            <div key={item.iso} onClick={() => setSelectedIndex(i)} style={{ flex: 1, minWidth: '30px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', height: '100%', justifyContent: 'flex-end', cursor: 'pointer', paddingRight: '2px', boxSizing: 'border-box' }}>
-              <span style={item.labelStyle}>{item.kwh}</span>
+          {dailyBars.map((item) => (
+            <div key={item.iso} onClick={() => setSelectedIso(item.iso)} style={{ flex: 1, minWidth: isWh ? '52px' : '30px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', height: '100%', justifyContent: 'flex-end', cursor: 'pointer', paddingRight: '2px', boxSizing: 'border-box' }}>
+              <span style={item.labelStyle}>{item.energyLabel}</span>
               <div style={item.barStyle} />
               <span style={item.dayLabelStyle}>{item.day}</span>
             </div>
@@ -268,7 +352,7 @@ export default function Reports() {
           <div>
             <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '17px', fontWeight: 700, margin: '0 0 4px' }}>Ngày {selectedDay.date}/{selectedDay.year}</h2>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: 'oklch(52% 0.02 240)', flexWrap: 'wrap' }}>
-              <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontWeight: 600, color: 'oklch(24% 0.03 240)', whiteSpace: 'nowrap' }}>{selectedDay.kwh.toFixed(1)} kWh</span>
+              <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontWeight: 600, color: 'oklch(24% 0.03 240)', whiteSpace: 'nowrap' }}>{selectedDayEnergy.value} {selectedDayEnergy.unit}</span>
               <span style={deltaStyle}>{deltaLabel}</span>
             </div>
           </div>
@@ -337,11 +421,11 @@ export default function Reports() {
           </div>
           <div style={{ textAlign: 'center', padding: '12px', background: 'oklch(97% 0.005 240)', borderRadius: '10px' }}>
             <div style={{ fontSize: '11.5px', color: 'oklch(52% 0.02 240)' }}>Tải tiêu thụ</div>
-            <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '16px', fontWeight: 600, marginTop: '4px' }}>{selectedDay.loadKwh.toFixed(1)} kWh</div>
+            <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '16px', fontWeight: 600, marginTop: '4px' }}>{selectedDayLoadEnergy.value} {selectedDayLoadEnergy.unit}</div>
           </div>
           <div style={{ textAlign: 'center', padding: '12px', background: 'oklch(97% 0.005 240)', borderRadius: '10px' }}>
-            <div style={{ fontSize: '11.5px', color: 'oklch(52% 0.02 240)' }}>Chu kỳ sạc pin (ước tính)</div>
-            <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '16px', fontWeight: 600, marginTop: '4px' }}>{Math.max(1, Math.round(selectedDay.kwh / 1.8))}</div>
+            <div style={{ fontSize: '11.5px', color: 'oklch(52% 0.02 240)' }}>Chu kỳ sạc trong ngày</div>
+            <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '16px', fontWeight: 600, marginTop: '4px' }}>{fmtCycles(dayCycles)}</div>
           </div>
         </div>
       </div>

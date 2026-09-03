@@ -161,11 +161,14 @@ function insertErrorText(error) {
 // mọi ESP32 cùng loại ở mọi trạm — nên hook này không nhận stationId.
 export function useFirmwareReleases() {
   const { user } = useAuth();
+  // Xem chú thích ở useTelemetry (lib/telemetry.js): effect bám vào user.id để
+  // không tải lại mỗi lần object `user` đổi identity.
+  const userId = user?.id ?? null;
   const [releases, setReleases] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (!user) return;
+    if (!userId) return;
     let cancelled = false;
 
     async function load() {
@@ -182,7 +185,7 @@ export function useFirmwareReleases() {
     return () => {
       cancelled = true;
     };
-  }, [user]);
+  }, [userId]);
 
   // Hai bước không nguyên tử: file vào bucket trước, rồi mới tới hàng metadata.
   // Thứ tự này là bắt buộc — `firmware_releases.storage_path` phải trỏ tới một

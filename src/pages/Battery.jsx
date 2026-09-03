@@ -2,9 +2,10 @@ import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import AppShell from '../components/AppShell.jsx';
 import { useIsMobile } from '../lib/useIsMobile.js';
-import { useStationSelector } from '../lib/stations.js';
+import { useStationSelector, fmtCycles, fmtEnergy, fmtPower, DEFAULT_PACK_CAPACITY_KWH } from '../lib/stations.js';
 import { useTelemetryToday } from '../lib/telemetry.js';
 import { useUserSettings } from '../lib/userSettings.js';
+import { tzHour } from '../lib/time.js';
 
 const BLUE = 'oklch(54% 0.15 240)';
 
@@ -27,10 +28,6 @@ const CUT_RED = 'oklch(58% 0.19 25)';
 // Nhãn mốc giờ bắt đầu của mỗi khung 2 giờ trong ngày (00-02, 02-04, ..., 22-24).
 const HOUR_LABELS = ['00', '02', '04', '06', '08', '10', '12', '14', '16', '18', '20', '22'];
 
-// Dung lượng pack BMS 100Ah / 48V (nhãn hiển thị trong trang) → dùng để ước tính
-// thời gian sạc đầy / thời gian dự phòng từ công suất nạp/xả hiện tại.
-const PACK_CAPACITY_KWH = 4.8;
-
 const CHARGE_GREEN = 'oklch(64% 0.15 150)';
 const DISCH_AMBER = 'oklch(75% 0.14 70)';
 
@@ -38,7 +35,9 @@ export default function Battery() {
   const navigate = useNavigate();
   const isMobile = useIsMobile(900);
   const { station, stationColor, stationOptions, stationMenuOpen, toggleStationMenu, closeStationMenu, loading: stationLoading } = useStationSelector();
-  const { readings: todayReadings } = useTelemetryToday(station?.id);
+  // "Hôm nay" và các khung giờ dưới đây tính theo múi giờ của TRẠM (migration
+  // 0021), không phải của trình duyệt — xem lib/time.js.
+  const { readings: todayReadings } = useTelemetryToday(station?.id, station?.timezone);
   const settings = useUserSettings(station?.id);
 
   function onNavigate(id) {
@@ -89,15 +88,18 @@ export default function Battery() {
   }));
   const hasToday = netSeries.length > 0;
 
-  // Gộp trung bình theo khung 2 giờ để vẽ biểu đồ cột.
+  // Gộp trung bình theo khung 2 giờ để vẽ biểu đồ cột. Nhãn HOUR_LABELS là giờ
+  // địa phương của trạm nên việc chia khung cũng phải theo đúng múi giờ đó.
   const buckets = HOUR_LABELS.map(() => ({ sum: 0, count: 0 }));
   for (const { ts, netKw } of netSeries) {
-    const idx = Math.min(buckets.length - 1, Math.floor(new Date(ts).getHours() / 2));
+    const idx = Math.min(buckets.length - 1, Math.floor(tzHour(ts, station.timezone) / 2));
     buckets[idx].sum += netKw;
     buckets[idx].count += 1;
   }
   const net = buckets.map((b) => (b.count ? +(b.sum / b.count).toFixed(2) : 0));
+  // Trần của trục đứng, vẫn tính bằng kW như dữ liệu nguồn; chỉ nhãn trục là W.
   const maxAbs = Math.max(...net.map((v) => Math.abs(v)), 0.1);
+  const axisMax = fmtPower(maxAbs);
   const flowBars = net.map((v, i) => {
     const h = (Math.abs(v) / maxAbs) * 88;
     const isCharge = v >= 0;
@@ -127,23 +129,39 @@ export default function Battery() {
     if (avgNet > 0) totalCharge += avgNet * dtHours;
     else totalDischarge += Math.abs(avgNet) * dtHours;
   }
-  const peakCharge = Math.max(0, ...netSeries.map((s) => s.netKw));
-  const peakDischarge = Math.abs(Math.min(0, ...netSeries.map((s) => s.netKw)));
+  const peakChargePower = fmtPower(Math.max(0, ...netSeries.map((s) => s.netKw)));
+  const peakDischargePower = fmtPower(Math.abs(Math.min(0, ...netSeries.map((s) => s.netKw))));
+  // Hiển thị theo đơn vị người dùng chọn (Cài đặt → Đơn vị đo lường) — các
+  // biến kWh gốc ở trên vẫn dùng nguyên cho ETA/EFC, chỉ đổi cách IN ra.
+  const totalChargeEnergy = fmtEnergy(totalCharge, settings.energyUnit);
+  const totalDischargeEnergy = fmtEnergy(totalDischarge, settings.energyUnit);
+
+  // Dung lượng pack do trạm khai báo (0020) — mẫu số của cả ước tính thời gian
+  // còn lại lẫn số chu kỳ quy đổi. Trạm cũ chưa có giá trị thì về mặc định.
+  const packCapacityKwh = station.batteryCapacityKwh ?? DEFAULT_PACK_CAPACITY_KWH;
+  const packCapacityEnergy = fmtEnergy(packCapacityKwh, settings.energyUnit);
 
   const nowNet = hasToday ? netSeries[netSeries.length - 1].netKw : null;
   const hasNow = nowNet != null;
-  const charging = hasNow && station.status !== 'offline' && station.batteryPct < 99 && nowNet > 0;
+  // Mất kết nối không xoá chiều dòng điện đã đo được: bản tin cuối vẫn nói pin
+  // lúc đó đang nạp hay xả, giống mọi số đo khác trên trang. Chỉ khi chưa có
+  // bản tin nào (`!hasNow`) mới là "không rõ". Cùng quy ước với vòng tròn pin ở
+  // màn Giám sát để hai trang không nói ngược nhau về cùng một trạm.
+  const charging = hasNow && station.batteryPct < 99 && nowNet > 0;
   const flowDirWord = !hasNow ? '—' : charging ? 'nạp' : 'xả';
-  const flowPowerLabel = hasNow ? Math.abs(nowNet).toFixed(2) : '--';
+  const flowPower = fmtPower(hasNow ? Math.abs(nowNet) : null);
+  // ETA thì ngược lại: đó là DỰ BÁO cho tương lai ("còn ~3 giờ đến đầy"), suy
+  // từ một mức công suất có thể đã ngừng từ lâu là nói sai — trạm mất kết nối
+  // vẫn để "—".
   let etaLabel;
   if (station.status === 'offline' || !hasNow) etaLabel = '—';
-  else if (charging) etaLabel = `~${Math.max(0.3, (100 - station.batteryPct) / 100 * PACK_CAPACITY_KWH / nowNet).toFixed(1)} giờ đến đầy`;
-  else etaLabel = `~${Math.max(0.3, station.batteryPct / 100 * PACK_CAPACITY_KWH / Math.max(0.05, Math.abs(nowNet))).toFixed(1)} giờ dự phòng`;
+  else if (charging) etaLabel = `~${Math.max(0.3, (100 - station.batteryPct) / 100 * packCapacityKwh / nowNet).toFixed(1)} giờ đến đầy`;
+  else etaLabel = `~${Math.max(0.3, station.batteryPct / 100 * packCapacityKwh / Math.max(0.05, Math.abs(nowNet))).toFixed(1)} giờ dự phòng`;
 
   const tempC = hasToday ? todayReadings[todayReadings.length - 1].tempC : null;
 
   const batteryDashOffset = (364.4 * (1 - station.batteryPct / 100)).toFixed(1);
-  const batteryChargingLabel = charging ? 'Đang sạc' : (station.status === 'offline' || !hasNow) ? 'Không rõ' : 'Đang xả';
+  const batteryChargingLabel = charging ? 'Đang sạc' : !hasNow ? 'Không rõ' : 'Đang xả';
 
   // Trạng thái relay bảo vệ do thiết bị báo về (station.chargeEnabled/... —
   // migration 0012). undefined/null = trạm chưa có firmware hỗ trợ báo về →
@@ -203,7 +221,7 @@ export default function Battery() {
           <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '26px', fontWeight: 700, margin: '0 0 4px', color: 'oklch(20% 0.03 240)' }}>Pin lưu trữ</h1>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13.5px', color: 'oklch(50% 0.02 240)', flexWrap: 'wrap' }}>
             <span style={{ display: 'flex', alignItems: 'center', gap: '8px', whiteSpace: 'nowrap' }}><span style={{ width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0, background: stationColor }} />{station.name} · {station.location}</span>
-            <span style={{ whiteSpace: 'nowrap' }}>· BMS 100Ah / 48V</span>
+            <span style={{ whiteSpace: 'nowrap' }}>· Pack {packCapacityEnergy.value} {packCapacityEnergy.unit}</span>
           </div>
         </div>
       </div>
@@ -225,7 +243,7 @@ export default function Battery() {
             <div style={{ fontSize: '13px', color: 'oklch(52% 0.02 240)', fontWeight: 600, marginBottom: '6px' }}>Trạng thái hiện tại</div>
             <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '24px', fontWeight: 700, color: charging ? 'oklch(50% 0.14 150)' : 'oklch(52% 0.13 70)' }}>{batteryChargingLabel}</div>
             <div style={{ fontSize: '13px', color: 'oklch(52% 0.02 240)', marginTop: '8px', lineHeight: 1.6 }}>
-              Công suất {flowDirWord}: <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontWeight: 600, color: 'oklch(24% 0.03 240)' }}>{flowPowerLabel} kW</span><br />
+              Công suất {flowDirWord}: <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontWeight: 600, color: 'oklch(24% 0.03 240)' }}>{flowPower.value} {flowPower.unit}</span><br />
               Thời gian còn lại (ước tính): <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontWeight: 600, color: 'oklch(24% 0.03 240)' }}>{etaLabel}</span>
             </div>
           </div>
@@ -237,16 +255,16 @@ export default function Battery() {
             <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '22px', fontWeight: 500 }}>{station.batteryVoltage.toFixed(1)}<span style={{ fontSize: '13px', color: 'oklch(55% 0.02 240)' }}>V</span></div>
           </div>
           <div style={{ background: 'white', border: '1px solid oklch(91% 0.01 240)', borderRadius: '14px', padding: '18px', boxShadow: '0 1px 2px oklch(0% 0 0 / 0.04)' }}>
-            <div style={{ fontSize: '12.5px', color: 'oklch(52% 0.02 240)', fontWeight: 600, marginBottom: '10px' }}>Sức khỏe pin</div>
-            <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '22px', fontWeight: 500, color: 'oklch(64% 0.15 150)' }}>96<span style={{ fontSize: '13px', color: 'oklch(55% 0.02 240)' }}>%</span></div>
+            <div style={{ fontSize: '12.5px', color: 'oklch(52% 0.02 240)', fontWeight: 600, marginBottom: '10px' }}>Dòng pin</div>
+            <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '22px', fontWeight: 500 }}>{station.batteryCurrent == null ? '--' : station.batteryCurrent.toFixed(1)}<span style={{ fontSize: '13px', color: 'oklch(55% 0.02 240)' }}>A</span></div>
           </div>
           <div style={{ background: 'white', border: '1px solid oklch(91% 0.01 240)', borderRadius: '14px', padding: '18px', boxShadow: '0 1px 2px oklch(0% 0 0 / 0.04)' }}>
             <div style={{ fontSize: '12.5px', color: 'oklch(52% 0.02 240)', fontWeight: 600, marginBottom: '10px' }}>Nhiệt độ</div>
             <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '22px', fontWeight: 500 }}>{tempC == null ? '--' : Math.round(tempC)}<span style={{ fontSize: '13px', color: 'oklch(55% 0.02 240)' }}>°C</span></div>
           </div>
           <div style={{ background: 'white', border: '1px solid oklch(91% 0.01 240)', borderRadius: '14px', padding: '18px', boxShadow: '0 1px 2px oklch(0% 0 0 / 0.04)' }}>
-            <div style={{ fontSize: '12.5px', color: 'oklch(52% 0.02 240)', fontWeight: 600, marginBottom: '10px' }}>Chu kỳ sạc</div>
-            <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '22px', fontWeight: 500 }}>214</div>
+            <div style={{ fontSize: '12.5px', color: 'oklch(52% 0.02 240)', fontWeight: 600, marginBottom: '10px' }} title="Chu kỳ quy đổi: tổng năng lượng nạp + xả chia cho hai lần dung lượng pack">Chu kỳ sạc</div>
+            <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '22px', fontWeight: 500 }}>{fmtCycles(station.batteryCycles)}</div>
           </div>
         </div>
       </div>
@@ -260,14 +278,14 @@ export default function Battery() {
             <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><span style={{ width: '10px', height: '10px', borderRadius: '3px', background: DISCH_AMBER, display: 'inline-block' }} />Xả (cấp cho tải)</span>
           </div>
         </div>
-        <p style={{ fontSize: '12.5px', color: 'oklch(52% 0.02 240)', margin: '0 0 20px' }}>Công suất pin theo giờ hôm nay (kW) · trên trục = sạc, dưới trục = xả</p>
+        <p style={{ fontSize: '12.5px', color: 'oklch(52% 0.02 240)', margin: '0 0 20px' }}>Công suất pin theo giờ hôm nay (W) · trên trục = sạc, dưới trục = xả</p>
 
         {hasToday ? (
         <div style={{ display: 'flex', gap: '12px' }}>
           <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between', alignItems: 'flex-end', height: '210px', paddingBottom: '22px', fontFamily: "'IBM Plex Mono',monospace", fontSize: '10.5px', color: 'oklch(58% 0.02 240)' }}>
-            <span>+{maxAbs.toFixed(1)}</span>
+            <span>+{axisMax.value}</span>
             <span>0</span>
-            <span>−{maxAbs.toFixed(1)}</span>
+            <span>−{axisMax.value}</span>
           </div>
           <div style={{ flex: 1, position: 'relative' }}>
             <div style={{ position: 'absolute', left: 0, right: 0, top: '94px', height: '1px', background: 'oklch(80% 0.012 240)', zIndex: 1 }} />
@@ -296,19 +314,19 @@ export default function Battery() {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))', gap: '12px', marginTop: '20px' }}>
           <div style={{ textAlign: 'center', padding: '12px', background: 'oklch(97% 0.005 240)', borderRadius: '10px' }}>
             <div style={{ fontSize: '11.5px', color: 'oklch(52% 0.02 240)' }}>Tổng nạp hôm nay</div>
-            <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '16px', fontWeight: 600, color: CHARGE_GREEN, marginTop: '4px' }}>{totalCharge.toFixed(1)} kWh</div>
+            <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '16px', fontWeight: 600, color: CHARGE_GREEN, marginTop: '4px' }}>{totalChargeEnergy.value} {totalChargeEnergy.unit}</div>
           </div>
           <div style={{ textAlign: 'center', padding: '12px', background: 'oklch(97% 0.005 240)', borderRadius: '10px' }}>
             <div style={{ fontSize: '11.5px', color: 'oklch(52% 0.02 240)' }}>Tổng xả hôm nay</div>
-            <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '16px', fontWeight: 600, color: 'oklch(60% 0.15 70)', marginTop: '4px' }}>{totalDischarge.toFixed(1)} kWh</div>
+            <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '16px', fontWeight: 600, color: 'oklch(60% 0.15 70)', marginTop: '4px' }}>{totalDischargeEnergy.value} {totalDischargeEnergy.unit}</div>
           </div>
           <div style={{ textAlign: 'center', padding: '12px', background: 'oklch(97% 0.005 240)', borderRadius: '10px' }}>
             <div style={{ fontSize: '11.5px', color: 'oklch(52% 0.02 240)' }}>Đỉnh nạp</div>
-            <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '16px', fontWeight: 600, marginTop: '4px' }}>{peakCharge.toFixed(1)} kW</div>
+            <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '16px', fontWeight: 600, marginTop: '4px' }}>{peakChargePower.value} {peakChargePower.unit}</div>
           </div>
           <div style={{ textAlign: 'center', padding: '12px', background: 'oklch(97% 0.005 240)', borderRadius: '10px' }}>
             <div style={{ fontSize: '11.5px', color: 'oklch(52% 0.02 240)' }}>Đỉnh xả</div>
-            <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '16px', fontWeight: 600, marginTop: '4px' }}>{peakDischarge.toFixed(1)} kW</div>
+            <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '16px', fontWeight: 600, marginTop: '4px' }}>{peakDischargePower.value} {peakDischargePower.unit}</div>
           </div>
         </div>
       </div>

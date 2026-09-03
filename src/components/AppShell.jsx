@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../lib/AuthContext.jsx';
+import { NOTIF_DOT_COLOR } from '../lib/alerts.js';
 import { userAvatarUrl } from '../lib/avatar.js';
 import Avatar from './Avatar.jsx';
 
@@ -12,13 +13,8 @@ const NAV_ITEMS = [
       <svg width="18" height="18" viewBox="0 0 20 20"><rect x="2" y="2" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.7" /><rect x="11" y="2" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.7" /><rect x="2" y="11" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.7" /><rect x="11" y="11" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.7" /></svg>
     ),
   },
-  {
-    id: 'flow',
-    label: 'Dòng năng lượng',
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 20 20"><circle cx="3.5" cy="10" r="2.2" fill="currentColor" /><circle cx="16.5" cy="10" r="2.2" fill="currentColor" /><line x1="6" y1="10" x2="14" y2="10" stroke="currentColor" strokeWidth="1.7" /><path d="M10.5 7l3 3-3 3" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>
-    ),
-  },
+  // Không có mục nav cho 'flow': sơ đồ Dòng năng lượng là một khối nằm sẵn
+  // trong trang Giám sát, vẫn bật/tắt được từ DevConsole → Hiển thị module.
   {
     id: 'chart',
     label: 'Biểu đồ thời gian thực',
@@ -42,7 +38,13 @@ const NAV_ITEMS = [
   },
   {
     id: 'alerts',
-    label: 'Cảnh báo',
+    // Mục này chứa LỊCH SỬ mọi thông báo gửi tới người dùng, không chỉ những
+    // sự cố đang diễn ra — nên tên là "Thông báo", còn "Cảnh báo" lùi về đúng
+    // vai một mức phân loại bên trong (xem ALERT_SEVERITY_META). `id` giữ
+    // nguyên 'alerts': nó là khoá của moduleVisibility trong database (0011)
+    // và của `?view=` trên URL, đổi tên máy đọc theo nhãn tiếng Việt sẽ làm
+    // hỏng cả hai.
+    label: 'Thông báo',
     icon: (
       <svg width="18" height="18" viewBox="0 0 20 20"><path d="M10 3c-2.2 0-3.6 1.7-3.6 4v2.3c0 .6-.2 1.2-.6 1.7l-1 1.3h10.4l-1-1.3c-.4-.5-.6-1.1-.6-1.7V7c0-2.3-1.4-4-3.6-4z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" /><path d="M8.3 15a1.7 1.7 0 003.4 0" fill="none" stroke="currentColor" strokeWidth="1.6" /></svg>
     ),
@@ -66,7 +68,6 @@ const NAV_ITEMS = [
   },
 ];
 
-const SEVERITY_COLOR = { warning: 'oklch(75% 0.14 70)', danger: 'oklch(58% 0.19 25)', info: 'oklch(54% 0.15 240)' };
 const BLUE = 'oklch(54% 0.15 240)';
 
 // Nút chuông + dropdown thông báo cho topbar mobile. Chỉ hiển thị khi trang
@@ -77,7 +78,7 @@ function MobileNotifBell({ notifOpen, onToggleNotif, onCloseNotif, unreadCount, 
   return (
     <div style={{ position: 'relative' }}>
       <button onClick={onToggleNotif} title="Thông báo" aria-label="Thông báo" style={{ position: 'relative', width: '34px', height: '34px', borderRadius: '9px', background: notifOpen ? 'oklch(30% 0.05 240)' : 'oklch(26% 0.045 240)', border: '1px solid oklch(34% 0.04 240)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', padding: 0, flexShrink: 0 }}>
-        <svg width="15" height="15" viewBox="0 0 20 20"><path d="M10 3c-2.2 0-3.6 1.7-3.6 4v2.3c0 .6-.2 1.2-.6 1.7l-1 1.3h10.4l-1-1.3c-.4-.5-.6-1.1-.6-1.7V7c0-2.3-1.4-4-3.6-4z" fill="none" stroke="white" strokeWidth="1.5" strokeLinejoin="round" /></svg>
+        <svg width="16" height="16" viewBox="0 0 24 24"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z" fill="white" /></svg>
         {unreadCount > 0 && (
           <span style={{ position: 'absolute', top: '-4px', right: '-4px', fontSize: '9.5px', fontWeight: 700, color: 'white', background: 'oklch(58% 0.19 25)', borderRadius: '8px', padding: '1px 5px', minWidth: '14px', textAlign: 'center' }}>{unreadCount}</span>
         )}
@@ -98,11 +99,11 @@ function MobileNotifBell({ notifOpen, onToggleNotif, onCloseNotif, unreadCount, 
               <div>
                 {notifItems.map((item) => (
                   <button
-                    key={item.id}
+                    key={item.key}
                     onClick={() => onMarkNotifRead(item.id)}
                     style={{ display: 'flex', gap: '10px', width: '100%', textAlign: 'left', padding: '13px 16px', background: 'none', border: 'none', borderBottom: '1px solid oklch(95% 0.006 240)', cursor: 'pointer', fontFamily: "'Manrope',sans-serif" }}
                   >
-                    <span style={{ width: '8px', height: '8px', borderRadius: '50%', marginTop: '5px', flexShrink: 0, background: SEVERITY_COLOR[item.severity] }} />
+                    <span style={{ width: '8px', height: '8px', borderRadius: '50%', marginTop: '5px', flexShrink: 0, background: NOTIF_DOT_COLOR[item.severity] }} />
                     <div style={{ minWidth: 0 }}>
                       <div style={{ fontSize: '13px', color: 'oklch(26% 0.03 240)', lineHeight: 1.45 }}>{item.msg}</div>
                       <div style={{ fontSize: '11.5px', color: 'oklch(58% 0.02 240)', marginTop: '2px' }}>{item.time}</div>
@@ -111,7 +112,7 @@ function MobileNotifBell({ notifOpen, onToggleNotif, onCloseNotif, unreadCount, 
                 ))}
               </div>
             )}
-            <button onClick={onViewAllNotifs} style={{ display: 'block', width: '100%', textAlign: 'center', padding: '12px', background: 'oklch(98% 0.004 240)', border: 'none', borderTop: '1px solid oklch(94% 0.008 240)', fontSize: '12.5px', fontWeight: 700, color: BLUE, cursor: 'pointer', fontFamily: "'Manrope',sans-serif" }}>Xem tất cả cảnh báo →</button>
+            <button onClick={onViewAllNotifs} style={{ display: 'block', width: '100%', textAlign: 'center', padding: '12px', background: 'oklch(98% 0.004 240)', border: 'none', borderTop: '1px solid oklch(94% 0.008 240)', fontSize: '12.5px', fontWeight: 700, color: BLUE, cursor: 'pointer', fontFamily: "'Manrope',sans-serif" }}>Xem tất cả thông báo →</button>
           </div>
         </>
       )}
@@ -154,10 +155,22 @@ export default function AppShell({
     (item) => item.id === 'overview' || item.id === 'settings' || (moduleVisibility[item.id] ?? true),
   );
   const avatarUrl = userAvatarUrl(user);
+  // Danh tính lấy từ `user_metadata`, KHÔNG truy vấn bảng `profiles`: AppShell
+  // chỉ có object `user` trong tay và nằm trên mọi trang, thêm một query ở đây
+  // là thêm một round-trip cho mỗi lần điều hướng. Cùng quy ước với ảnh đại
+  // diện — xem chú thích ở handleAvatarFile (pages/Dashboard.jsx), và vì vậy
+  // saveProfile phải đồng bộ tên sang user_metadata thì chỗ này mới không hiện
+  // tên cũ sau khi người dùng đổi tên.
+  //
+  // Chưa đặt tên thì email lên thẳng dòng đầu: nó là danh tính rõ ràng nhất
+  // đang có, hơn hẳn một nhãn chung chung rồi lặp lại email ngay bên dưới.
+  const fullName = user?.user_metadata?.full_name || user?.user_metadata?.name || '';
+  const displayName = fullName || user?.email || 'Tài khoản';
+  const displaySubtitle = fullName ? user?.email : '';
   const sidebarAvatar = (
     <Avatar
       url={avatarUrl}
-      name={user?.user_metadata?.full_name || user?.user_metadata?.name}
+      name={fullName}
       email={user?.email}
       size={34}
       background="oklch(32% 0.04 240)"
@@ -238,9 +251,13 @@ export default function AppShell({
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '12px 8px', borderTop: '1px solid oklch(32% 0.04 240 / 0.5)' }}>
             {sidebarAvatar}
+            {/* `title` trên cả hai dòng: cột này chỉ rộng ~150px nên email và
+                tên dài chắc chắn bị cắt, di chuột vào là đọc được đầy đủ. */}
             <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: '13px', fontWeight: 700, color: 'white', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>Hộ gia đình</div>
-              <div style={{ fontSize: '11.5px', color: 'oklch(65% 0.03 240)' }}>Tài khoản chủ hộ</div>
+              <div title={displayName} style={{ fontSize: '13px', fontWeight: 700, color: 'white', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayName}</div>
+              {displaySubtitle && (
+                <div title={displaySubtitle} style={{ fontSize: '11.5px', color: 'oklch(65% 0.03 240)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displaySubtitle}</div>
+              )}
             </div>
           </div>
         </div>

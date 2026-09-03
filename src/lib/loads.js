@@ -23,11 +23,14 @@ function mapRow(row) {
 // (no ESP32 assigned to switch it) can be tracked but not turned on/off.
 export function useLoads(stationId) {
   const { user } = useAuth();
+  // Xem chú thích ở useTelemetry (lib/telemetry.js): effect bám vào user.id để
+  // không mở lại kênh realtime mỗi lần object `user` đổi identity.
+  const userId = user?.id ?? null;
   const [loads, setLoads] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (!user || !stationId) {
+    if (!userId || !stationId) {
       setLoads([]);
       setLoading(false);
       return;
@@ -73,7 +76,7 @@ export function useLoads(stationId) {
       cancelled = true;
       supabase.removeChannel(channel);
     };
-  }, [user, stationId]);
+  }, [userId, stationId]);
 
   async function addLoad({ name, watt, deviceId }) {
     if (!user || !stationId) return { error: new Error('not_ready') };
@@ -101,6 +104,31 @@ export function useLoads(stationId) {
     return {};
   }
 
+  // Gán/gỡ thiết bị điều khiển cho một tải đã tạo. `deviceId` rỗng = gỡ về
+  // "chỉ theo dõi".
+  //
+  // Ghi thẳng qua RLS (policy `loads_update_own`, migration 0010) chứ không qua
+  // Edge Function: đây chỉ là đổi một liên kết trong database, không có lệnh
+  // nào phải publish ra AWS IoT.
+  //
+  // Cố ý KHÔNG tự xoá reported_state/desired_state ở đây — trigger
+  // `loads_protect_reported_columns` (migration 0031) làm việc đó khi thấy
+  // device_id đổi. Hai lý do: client không có quyền ghi reported_* (cùng
+  // trigger đó chặn), và bất biến "đổi thiết bị thì trạng thái cũ hết hiệu lực"
+  // phải đúng với mọi đường ghi, kể cả khoá ngoại tự đặt null lúc xoá thiết bị.
+  async function setLoadDevice(id, deviceId) {
+    const { data, error } = await supabase
+      .from('loads')
+      .update({ device_id: deviceId || null })
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) return { error };
+    const mapped = mapRow(data);
+    setLoads((prev) => prev.map((l) => (l.id === mapped.id ? mapped : l)));
+    return { data: mapped };
+  }
+
   // Sends the command through AWS IoT (send-load-command); does not flip
   // desiredState locally on call — the row update comes back via the
   // function's response / the realtime subscription above.
@@ -115,5 +143,5 @@ export function useLoads(stationId) {
     return { data: mapped };
   }
 
-  return { loads, loading, addLoad, removeLoad, setLoadState };
+  return { loads, loading, addLoad, removeLoad, setLoadDevice, setLoadState };
 }

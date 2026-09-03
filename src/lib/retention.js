@@ -46,6 +46,9 @@ export function formatArchiveMonth(month) {
 
 export function useRetention() {
   const { user } = useAuth();
+  // Xem chú thích ở useTelemetry (lib/telemetry.js): effect bám vào user.id để
+  // không tải lại mỗi lần object `user` đổi identity.
+  const userId = user?.id ?? null;
   const [settings, setSettings] = useState(null);
   const [archives, setArchives] = useState([]);
   const [usage, setUsage] = useState(null);
@@ -55,7 +58,7 @@ export function useRetention() {
   const refresh = useCallback(() => setReloadKey((k) => k + 1), []);
 
   useEffect(() => {
-    if (!user) {
+    if (!userId) {
       setSettings(null);
       setArchives([]);
       setUsage(null);
@@ -70,7 +73,7 @@ export function useRetention() {
         supabase
           .from('user_settings')
           .select('telemetry_retention_days, telemetry_archive_enabled, log_retention_days, archive_last_run_at')
-          .eq('owner_id', user.id)
+          .eq('owner_id', userId)
           .maybeSingle(),
         supabase
           .from('telemetry_archives')
@@ -100,7 +103,7 @@ export function useRetention() {
     return () => {
       cancelled = true;
     };
-  }, [user, reloadKey]);
+  }, [userId, reloadKey]);
 
   // Ghi cài đặt. Cập nhật state lạc quan trước để ô nhập không nhảy về giá trị
   // cũ trong lúc chờ round-trip; CHECK constraint ở DB (7..365) là chốt chặn

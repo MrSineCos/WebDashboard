@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useStations } from '../lib/stations.js';
-import { useDevices } from '../lib/telemetry.js';
+import { useDevices, useIngestRate } from '../lib/telemetry.js';
 import { useUserSettings } from '../lib/userSettings.js';
 import { useLoads } from '../lib/loads.js';
 import {
@@ -13,7 +13,14 @@ import {
   fwStatusDetailText,
   useFirmwareReleases,
 } from '../lib/firmware.js';
-import { LEVEL_META, formatLogTime, useSystemLogs } from '../lib/systemLogs.js';
+import {
+  LEVEL_META,
+  SOURCE_FILTERS,
+  SOURCE_META,
+  exportLogsCsv,
+  formatLogTime,
+  useSystemLogs,
+} from '../lib/systemLogs.js';
 import {
   DB_LIMIT_BYTES,
   RETENTION_MAX_DAYS,
@@ -45,7 +52,7 @@ function devRelative(ts) {
 const SENSORS = [
   { name: 'Cảm biến điện áp pin', raw: '612 ADC', scale: '0.0812', offset: '-0.4', calibrated: '48.3 V' },
   { name: 'Cảm biến dòng điện tải', raw: '298 ADC', scale: '0.0431', offset: '0.0', calibrated: '12.8 A' },
-  { name: 'Cảm biến công suất mặt trời', raw: '—', scale: '1.000', offset: '0.0', calibrated: '2.4 kW' },
+  { name: 'Cảm biến công suất mặt trời', raw: '—', scale: '1.000', offset: '0.0', calibrated: '2.400 W' },
   { name: 'Cảm biến nhiệt độ pin', raw: '822 ADC', scale: '0.0512', offset: '-2.1', calibrated: '31°C' },
 ];
 
@@ -62,7 +69,7 @@ const MODULE_DEFS = [
   { id: 'chart', label: 'Biểu đồ thời gian thực', desc: 'Biểu đồ điện áp / dòng điện / công suất' },
   { id: 'battery', label: 'Pin lưu trữ', desc: 'Gauge % sạc và thông số pin' },
   { id: 'load', label: 'Điều khiển tải', desc: 'Danh sách bật/tắt thiết bị từ xa' },
-  { id: 'alerts', label: 'Cảnh báo', desc: 'Danh sách cảnh báo gần đây' },
+  { id: 'alerts', label: 'Thông báo', desc: 'Lịch sử thông báo và cảnh báo gửi tới người dùng' },
   { id: 'reports', label: 'Báo cáo', desc: 'Biểu đồ sản lượng 7 ngày qua' },
 ];
 
@@ -71,6 +78,11 @@ const STATUS_COLOR = { online: 'oklch(70% 0.15 150)', offline: 'oklch(62% 0.19 2
 // Giây → "14n 6h 32p". Cắt hẳn phần giây: chu kỳ telemetry ~10s nên chữ số
 // giây chỉ nhấp nháy chứ không thêm thông tin gì. null = không đọc được.
 function formatUptime(seconds) {
+  // null/undefined phải trả về null ("Thiết bị chưa báo") chứ không phải "0p":
+  // Number(null) === 0 nên thiếu dòng này, ô "Thời gian hoạt động" khẳng định
+  // thiết bị vừa khởi động trong khi thực ra nó chưa hề báo trường nào — và ba
+  // ô chẩn đoán cạnh nhau lại nói hai chuyện khác nhau về cùng một thiết bị.
+  if (seconds == null || seconds === '') return null;
   const s = Number(seconds);
   if (!Number.isFinite(s) || s < 0) return null;
   const days = Math.floor(s / 86400);
@@ -205,6 +217,127 @@ function ApplyAllButton({ label, confirming, onClick }) {
     >
       {confirming ? 'Xác nhận áp dụng cho mọi trạm?' : label}
     </button>
+  );
+}
+
+// "Bao lâu rồi" ở độ phân giải GIÂY — khác devRelative (phút) ở trên. Dùng cho
+// nhịp tim của luồng telemetry: chu kỳ publish ~10 giây, nên "vừa xong" suốt
+// một phút không phân biệt được đường ống đang chạy với đường ống vừa chết.
+function sinceSeconds(ts) {
+  const s = Math.max(0, Math.floor((Date.now() - new Date(ts).getTime()) / 1000));
+  if (s < 60) return `${s} giây trước`;
+  if (s < 3600) return `${Math.floor(s / 60)} phút trước`;
+  if (s < 86400) return `${Math.floor(s / 3600)} giờ trước`;
+  return `${Math.floor(s / 86400)} ngày trước`;
+}
+
+// Dải trạng thái luồng dữ liệu, đặt ngay trên khung nhật ký.
+//
+// Lý do tồn tại: nhật ký hệ thống chỉ ghi sự kiện RỜI RẠC, nên một trạm hoàn
+// toàn khoẻ mạnh sinh 0 dòng — và khung trống trơn thì trông y hệt lúc tính
+// năng hỏng. Đây là chỗ trả lời "ngay lúc này có đang nhận dữ liệu không" mà
+// không cần ghi 8.640 dòng "đã nhận bản tin" mỗi ngày vào nhật ký.
+//
+// 90 giây là ngưỡng của chính hệ thống (mark_stale_offline, 0006) — dùng lại
+// đúng con số đó để dải này không bao giờ báo "đang nhận" trong khi đèn trạm
+// đã chuyển offline.
+function IngestStatus({ station, devices, hourlyCount }) {
+  // Nhịp đồng hồ 1 giây: con số phải TỰ CHẠY thì mới là bằng chứng đường ống
+  // còn sống. Một mốc thời gian đứng im không phân biệt được với trang treo.
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => tick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Mốc mới nhất trong số các thiết bị của trạm, không lấy stations.last_seen_at:
+  // hàng `devices` có realtime (0028) nên nó tự cập nhật, và nó cũng cho biết
+  // THIẾT BỊ NÀO đang im lặng khi trạm có nhiều thiết bị.
+  const seenAt = devices
+    .map((d) => d.last_seen_at)
+    .filter(Boolean)
+    .sort()
+    .pop();
+  const onlineCount = devices.filter((d) => d.status === 'connected').length;
+  const ageMs = seenAt ? Date.now() - new Date(seenAt).getTime() : null;
+  const live = ageMs != null && ageMs < 90000;
+
+  const color = seenAt == null
+    ? 'oklch(60% 0.02 250)'
+    : live
+      ? 'oklch(70% 0.15 150)'
+      : 'oklch(70% 0.16 25)';
+
+  const label = seenAt == null
+    ? 'Chưa nhận được dữ liệu nào từ trạm này'
+    : live
+      ? 'Đang nhận dữ liệu'
+      : 'Đã ngừng nhận dữ liệu';
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', background: 'oklch(15% 0.02 250)', border: '1px solid oklch(28% 0.02 250)', borderRadius: '10px', padding: '10px 14px', marginBottom: '10px', fontFamily: "'IBM Plex Mono',monospace", fontSize: '12px' }}>
+      <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: color, flexShrink: 0 }} />
+      <span style={{ color, fontWeight: 600 }}>{label}</span>
+      {seenAt && (
+        <span style={{ color: 'oklch(62% 0.015 250)' }}>· bản tin gần nhất {sinceSeconds(seenAt)}</span>
+      )}
+      <span style={{ color: 'oklch(62% 0.015 250)' }}>
+        · {hourlyCount == null ? '—' : hourlyCount.toLocaleString('vi-VN')} bản tin trong 1 giờ qua
+      </span>
+      <span style={{ color: 'oklch(62% 0.015 250)' }}>
+        · {onlineCount}/{devices.length} thiết bị online
+      </span>
+      {station?.status === 'offline' && (
+        <span style={{ color: 'oklch(70% 0.16 25)' }}>· trạm đang offline</span>
+      )}
+    </div>
+  );
+}
+
+// Một dòng nhật ký. Ba tầng thông tin, xếp theo thứ tự cần tới:
+//
+//   1. luôn hiện — thời điểm, mức, nhóm nguồn, câu tiếng Việt;
+//   2. mã sự kiện (`event`) hiện mờ ở cuối dòng — đây là thứ ổn định khi câu
+//      chữ được sửa lại, nên là thứ đem đi tra cứu/báo lỗi;
+//   3. `meta` (giá trị cũ/mới, ngưỡng, id) chỉ mở ra khi bấm: nó là dữ liệu
+//      chẩn đoán cho đúng một dòng, hiện sẵn cho cả trăm dòng thì che mất
+//      chính cái nhật ký.
+//
+// Chỉ những dòng CÓ meta mới bấm được — một affordance mở ra chỗ trống là lời
+// hứa suông.
+function LogRow({ item }) {
+  const [open, setOpen] = useState(false);
+  const level = LEVEL_META[item.level] ?? LEVEL_META.info;
+  const source = SOURCE_META[item.source] ?? SOURCE_META.db;
+  const hasMeta = item.meta && Object.keys(item.meta).length > 0;
+
+  return (
+    <div style={{ padding: '7px 0', borderBottom: '1px solid oklch(22% 0.015 250)' }}>
+      <div
+        onClick={hasMeta ? () => setOpen((v) => !v) : undefined}
+        style={{ display: 'flex', gap: '10px', alignItems: 'baseline', cursor: hasMeta ? 'pointer' : 'default' }}
+      >
+        <span style={{ color: 'oklch(52% 0.015 250)', flexShrink: 0, whiteSpace: 'nowrap' }}>{formatLogTime(item.createdAt)}</span>
+        <span style={{ color: level.color, fontWeight: 600, flexShrink: 0, width: '54px' }}>{level.label}</span>
+        <span style={{ flexShrink: 0, fontSize: '10.5px', fontWeight: 600, letterSpacing: '0.03em', color: source.color, background: 'oklch(22% 0.02 250)', border: '1px solid oklch(30% 0.02 250)', borderRadius: '5px', padding: '2px 7px', whiteSpace: 'nowrap' }}>
+          {source.label}
+        </span>
+        <span style={{ color: 'oklch(85% 0.01 250)', minWidth: 0, wordBreak: 'break-word', flex: 1 }}>
+          {item.message}
+          <span style={{ color: 'oklch(45% 0.015 250)', fontSize: '11px', marginLeft: '8px', whiteSpace: 'nowrap' }}>
+            {item.event}
+          </span>
+        </span>
+        {hasMeta && (
+          <span style={{ flexShrink: 0, color: 'oklch(50% 0.015 250)', fontSize: '11px' }}>{open ? '▲' : '▼'}</span>
+        )}
+      </div>
+      {open && hasMeta && (
+        <pre style={{ margin: '8px 0 2px', padding: '10px 12px', background: 'oklch(14% 0.02 250)', border: '1px solid oklch(26% 0.02 250)', borderRadius: '8px', color: 'oklch(72% 0.02 250)', fontSize: '11.5px', lineHeight: 1.6, overflowX: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+          {JSON.stringify(item.meta, null, 2)}
+        </pre>
+      )}
+    </div>
   );
 }
 
@@ -551,6 +684,12 @@ export default function DevConsole() {
   const [activeNav, setActiveNav] = useState('overview');
   const [stationMenuOpen, setStationMenuOpen] = useState(false);
   const [logFilter, setLogFilter] = useState('all');
+  // Lọc theo NHÓM nguồn ('alert' / 'device' / 'config'…) và tìm theo nội dung.
+  // Cả hai đều chạy ở phía server (xem useSystemLogs) — với ~35 loại sự kiện
+  // thì lọc theo mức info/warn/error một mình không còn thu hẹp được gì: gần
+  // như mọi sự cố đều là 'error'.
+  const [logSource, setLogSource] = useState('all');
+  const [logSearch, setLogSearch] = useState('');
   const [simMode, setSimMode] = useState(false);
   const [simSolar, setSimSolar] = useState(2.4);
   const [simBattery, setSimBattery] = useState(78);
@@ -609,8 +748,23 @@ export default function DevConsole() {
   // Lọc mức log ở phía server (hook nhận `logFilter`) thay vì kéo hết về rồi
   // lọc trong trình duyệt — sau vài tuần chạy thật, nhật ký dài hơn nhiều so
   // với 200 dòng mà khung hiển thị dùng tới.
-  const { logs, loading: logsLoading, error: logsError, clearStationLogs } =
-    useSystemLogs(currentStation?.id, { level: logFilter });
+  const {
+    logs,
+    loading: logsLoading,
+    loadingMore: logsLoadingMore,
+    hasMore: logsHasMore,
+    error: logsError,
+    loadMore: loadMoreLogs,
+    clearStationLogs,
+  } = useSystemLogs(currentStation?.id, {
+    level: logFilter,
+    source: logSource,
+    search: logSearch,
+  });
+  // Nhịp tim của đường ống telemetry — nhật ký cố ý im lặng khi mọi thứ bình
+  // thường, nên đây là chỗ duy nhất nói được "vẫn đang chạy" mà không phải ghi
+  // một dòng log cho mỗi bản tin (xem useIngestRate).
+  const ingestRate = useIngestRate(currentStation?.id);
   const retention = useRetention();
   const { user, signOut } = useAuth();
   const routerNavigate = useNavigate();
@@ -954,7 +1108,6 @@ export default function DevConsole() {
     null;
 
   const diagUptime = diagDevice ? formatUptime(diagDevice.uptime_s) : null;
-  const diagMcuTemp = diagDevice?.mcu_temp_c != null ? `${Math.round(Number(diagDevice.mcu_temp_c))}°C` : null;
   const diagBootCount = diagDevice?.boot_count != null ? String(diagDevice.boot_count) : null;
   // Trạng thái MQTT không cần cột riêng: trigger apply_telemetry đặt
   // `devices.status='connected'` mỗi bản tin, `mark_stale_offline` (0006) gạt
@@ -993,15 +1146,24 @@ export default function DevConsole() {
             {/* Chỉ hiện bộ chọn khi thật sự có nhiều hơn một ESP32 — với trạm
                 một thiết bị thì dòng định danh bên dưới đã đủ rõ. */}
             {esp32Devices.length > 1 && (
-              <select
-                value={diagDevice?.id ?? ''}
-                onChange={(e) => setDiagDeviceId(e.target.value)}
-                style={{ padding: '9px 11px', borderRadius: '8px', border: '1px solid oklch(34% 0.02 250)', background: 'oklch(15% 0.02 250)', color: 'white', fontSize: '12.5px', fontFamily: "'IBM Plex Mono',monospace", maxWidth: '260px' }}
-              >
-                {esp32Devices.map((d) => (
-                  <option key={d.id} value={d.id}>{d.name}</option>
-                ))}
-              </select>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'flex-end' }}>
+                <span style={{ fontSize: '11px', fontWeight: 600, color: 'oklch(62% 0.015 250)', letterSpacing: '0.02em' }}>Xem thiết bị</span>
+                <div style={{ position: 'relative' }}>
+                  <span style={{ position: 'absolute', left: '13px', top: '50%', transform: 'translateY(-50%)', width: '7px', height: '7px', borderRadius: '50%', background: STATUS_COLOR[diagMqttOnline ? 'online' : 'offline'], pointerEvents: 'none' }} />
+                  <select
+                    value={diagDevice?.id ?? ''}
+                    onChange={(e) => setDiagDeviceId(e.target.value)}
+                    style={{ appearance: 'none', padding: '10px 34px 10px 28px', borderRadius: '8px', border: '1px solid oklch(34% 0.02 250)', background: 'oklch(16% 0.02 250)', color: 'white', fontSize: '13.5px', fontWeight: 600, fontFamily: "'Space Grotesk',sans-serif", minWidth: '200px', maxWidth: '280px', cursor: 'pointer' }}
+                  >
+                    {esp32Devices.map((d) => (
+                      <option key={d.id} value={d.id}>{d.name}</option>
+                    ))}
+                  </select>
+                  <svg width="11" height="11" viewBox="0 0 20 20" style={{ position: 'absolute', right: '13px', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }}>
+                    <path d="M4 7l6 6 6-6" fill="none" stroke="oklch(62% 0.015 250)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </div>
+              </div>
             )}
           </div>
 
@@ -1011,12 +1173,14 @@ export default function DevConsole() {
             </div>
           ) : (
             <>
-              <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '11.5px', color: 'oklch(58% 0.015 250)', marginBottom: '10px' }}>
-                {diagDevice.aws_thing_name} · {devRelative(diagDevice.last_seen_at)}
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px', flexWrap: 'wrap', marginBottom: '10px' }}>
+                <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '13px', fontWeight: 700, color: 'white' }}>{diagDevice.name}</span>
+                <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '11.5px', color: 'oklch(58% 0.015 250)' }}>
+                  {diagDevice.aws_thing_name} · {devRelative(diagDevice.last_seen_at)}
+                </span>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px,1fr))', gap: '14px', marginBottom: '16px' }}>
                 <DiagCard label="Thời gian hoạt động" value={diagUptime} />
-                <DiagCard label="Nhiệt độ MCU" value={diagMcuTemp} />
                 <DiagCard label="Số lần khởi động lại" value={diagBootCount} />
                 <div style={{ background: 'oklch(19% 0.022 250)', border: '1px solid oklch(30% 0.02 250)', borderRadius: '12px', padding: '16px' }}>
                   <div style={{ fontSize: '11.5px', color: 'oklch(62% 0.015 250)', marginBottom: '8px' }}>Kết nối MQTT Broker</div>
@@ -1483,26 +1647,61 @@ export default function DevConsole() {
             <div>
               <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '22px', fontWeight: 700, margin: '0 0 4px' }}>Nhật ký hệ thống</h1>
               <p style={{ fontSize: '13px', color: 'oklch(62% 0.015 250)', margin: 0 }}>
-                Sự kiện thật do thiết bị và server ghi lại — mất kết nối, vượt ngưỡng pin, cập nhật firmware, dọn dữ liệu
+                Sự kiện thật do thiết bị và server ghi lại — sự cố vận hành, kết nối thiết bị, điều khiển tải, thay đổi cấu hình, firmware và dọn dữ liệu
               </p>
             </div>
-            <button
-              onClick={handleClearLogs}
-              disabled={logs.length === 0}
-              style={{ padding: '9px 16px', borderRadius: '8px', border: confirmClearLogs ? '1px solid oklch(70% 0.16 25)' : '1px solid oklch(38% 0.03 250)', background: confirmClearLogs ? 'oklch(28% 0.06 25)' : 'oklch(22% 0.025 250)', fontSize: '12.5px', fontWeight: 600, color: confirmClearLogs ? 'oklch(80% 0.14 25)' : 'oklch(85% 0.01 250)', cursor: logs.length === 0 ? 'default' : 'pointer', opacity: logs.length === 0 ? 0.45 : 1, whiteSpace: 'nowrap' }}
-            >
-              {confirmClearLogs ? 'Xác nhận xoá nhật ký trạm này?' : 'Xoá nhật ký'}
-            </button>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              <button
+                onClick={() => exportLogsCsv(logs, currentStation?.name)}
+                disabled={logs.length === 0}
+                style={{ padding: '9px 16px', borderRadius: '8px', border: '1px solid oklch(38% 0.03 250)', background: 'oklch(22% 0.025 250)', fontSize: '12.5px', fontWeight: 600, color: 'oklch(85% 0.01 250)', cursor: logs.length === 0 ? 'default' : 'pointer', opacity: logs.length === 0 ? 0.45 : 1, whiteSpace: 'nowrap' }}
+              >
+                Xuất CSV
+              </button>
+              <button
+                onClick={handleClearLogs}
+                disabled={logs.length === 0}
+                style={{ padding: '9px 16px', borderRadius: '8px', border: confirmClearLogs ? '1px solid oklch(70% 0.16 25)' : '1px solid oklch(38% 0.03 250)', background: confirmClearLogs ? 'oklch(28% 0.06 25)' : 'oklch(22% 0.025 250)', fontSize: '12.5px', fontWeight: 600, color: confirmClearLogs ? 'oklch(80% 0.14 25)' : 'oklch(85% 0.01 250)', cursor: logs.length === 0 ? 'default' : 'pointer', opacity: logs.length === 0 ? 0.45 : 1, whiteSpace: 'nowrap' }}
+              >
+                {confirmClearLogs ? 'Xác nhận xoá nhật ký trạm này?' : 'Xoá nhật ký'}
+              </button>
+            </div>
           </div>
 
-          <div style={{ display: 'flex', gap: '8px', marginBottom: '14px', flexWrap: 'wrap' }}>
-            <button style={chipStyle(logFilter === 'all')} onClick={() => setLogFilter('all')}>Tất cả</button>
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '10px', flexWrap: 'wrap' }}>
+            <button style={chipStyle(logFilter === 'all')} onClick={() => setLogFilter('all')}>Tất cả mức</button>
             <button style={chipStyle(logFilter === 'info')} onClick={() => setLogFilter('info')}>Info</button>
             <button style={chipStyle(logFilter === 'warn')} onClick={() => setLogFilter('warn')}>Warning</button>
             <button style={chipStyle(logFilter === 'error')} onClick={() => setLogFilter('error')}>Error</button>
           </div>
 
-          <div style={{ background: 'oklch(9% 0.015 250)', border: '1px solid oklch(30% 0.02 250)', borderRadius: '12px', padding: '16px 18px', fontFamily: "'IBM Plex Mono',monospace", fontSize: '12.5px', maxHeight: '420px', overflowY: 'auto' }}>
+          {/* Nhóm nguồn — bộ lọc thực sự hữu ích khi nhật ký đã đủ loại sự
+              kiện: "trạm này hôm nay có sự cố gì" (Cảnh báo) và "ai vừa đổi
+              cái gì" (Cấu hình) là hai câu hỏi khác hẳn nhau, mà lọc theo mức
+              info/warn/error thì không tách được. */}
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '10px', flexWrap: 'wrap' }}>
+            <button style={chipStyle(logSource === 'all')} onClick={() => setLogSource('all')}>Mọi nguồn</button>
+            {SOURCE_FILTERS.map((s) => (
+              <button key={s} style={chipStyle(logSource === s)} onClick={() => setLogSource(s)}>
+                {SOURCE_META[s].label}
+              </button>
+            ))}
+          </div>
+
+          <input
+            value={logSearch}
+            onChange={(e) => setLogSearch(e.target.value)}
+            placeholder="Tìm trong nhật ký — nội dung hoặc mã sự kiện (vd: overtemp, firmware, tải)"
+            style={{ ...darkFieldStyle, marginBottom: '10px' }}
+          />
+
+          <IngestStatus
+            station={currentStation}
+            devices={stationDevices}
+            hourlyCount={ingestRate}
+          />
+
+          <div style={{ background: 'oklch(9% 0.015 250)', border: '1px solid oklch(30% 0.02 250)', borderRadius: '12px', padding: '16px 18px', fontFamily: "'IBM Plex Mono',monospace", fontSize: '12.5px', maxHeight: '520px', overflowY: 'auto' }}>
             {logsLoading ? (
               <div style={{ color: 'oklch(55% 0.015 250)', padding: '6px 0' }}>Đang tải nhật ký…</div>
             ) : logsError ? (
@@ -1510,29 +1709,34 @@ export default function DevConsole() {
             ) : logs.length === 0 ? (
               // Nhật ký rỗng là trạng thái TỐT (không có sự cố nào), không phải
               // lỗi — nói rõ để không ai tưởng tính năng chưa chạy, đúng thứ
-              // nhầm lẫn mà mảng dữ liệu giả trước đây gây ra.
+              // nhầm lẫn mà mảng dữ liệu giả trước đây gây ra. Nhưng khi đang
+              // có bộ lọc, "trống" gần như luôn là do bộ lọc chứ không phải do
+              // hệ thống im lặng — nói đúng nguyên nhân thay vì lời trấn an.
               <div style={{ color: 'oklch(55% 0.015 250)', padding: '6px 0', lineHeight: 1.7 }}>
-                {logFilter === 'all'
-                  ? 'Chưa có sự kiện nào được ghi lại cho trạm này. Nhật ký chỉ ghi sự kiện rời rạc (mất/lập lại kết nối, pin dưới ngưỡng, cập nhật firmware, dọn dữ liệu) — thiết bị chạy bình thường thì mục này trống.'
-                  : `Không có sự kiện mức ${logFilter.toUpperCase()} nào.`}
+                {logFilter === 'all' && logSource === 'all' && !logSearch
+                  ? 'Chưa có sự kiện nào được ghi lại cho trạm này. Nhật ký chỉ ghi sự kiện rời rạc (sự cố vận hành, mất/lập lại kết nối, bật/tắt tải, đổi cấu hình, cập nhật firmware, dọn dữ liệu) — hệ thống chạy bình thường và không ai chỉnh gì thì mục này trống. Việc telemetry về đều KHÔNG sinh dòng nào ở đây: xem dải trạng thái ngay phía trên để biết đường ống có đang chạy hay không.'
+                  : 'Không có sự kiện nào khớp bộ lọc đang chọn. Thử bỏ bớt bộ lọc hoặc xoá từ khoá tìm kiếm.'}
               </div>
             ) : (
-              logs.map((item) => {
-                const meta = LEVEL_META[item.level] ?? LEVEL_META.info;
-                return (
-                  <div key={item.id} style={{ display: 'flex', gap: '10px', padding: '7px 0', borderBottom: '1px solid oklch(22% 0.015 250)' }}>
-                    <span style={{ color: 'oklch(52% 0.015 250)', flexShrink: 0, whiteSpace: 'nowrap' }}>{formatLogTime(item.createdAt)}</span>
-                    <span style={{ color: meta.color, fontWeight: 600, flexShrink: 0, width: '54px' }}>{meta.label}</span>
-                    <span style={{ color: 'oklch(85% 0.01 250)', minWidth: 0, wordBreak: 'break-word' }}>{item.message}</span>
-                  </div>
-                );
-              })
+              logs.map((item) => <LogRow key={item.id} item={item} />)
             )}
           </div>
+
           {logs.length > 0 && (
-            <div style={{ fontSize: '11.5px', color: 'oklch(52% 0.015 250)', marginTop: '8px' }}>
-              Hiển thị {logs.length} sự kiện gần nhất
-              {retention.settings ? ` · tự động xoá sau ${retention.settings.logRetentionDays} ngày` : ''}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap', marginTop: '10px' }}>
+              <div style={{ fontSize: '11.5px', color: 'oklch(52% 0.015 250)' }}>
+                Hiển thị {logs.length} sự kiện{logsHasMore ? ' gần nhất' : ''}
+                {retention.settings ? ` · tự động xoá sau ${retention.settings.logRetentionDays} ngày` : ''}
+              </div>
+              {logsHasMore && (
+                <button
+                  onClick={loadMoreLogs}
+                  disabled={logsLoadingMore}
+                  style={{ padding: '8px 16px', borderRadius: '8px', border: '1px solid oklch(38% 0.03 250)', background: 'oklch(22% 0.025 250)', fontSize: '12.5px', fontWeight: 600, color: 'oklch(85% 0.01 250)', cursor: logsLoadingMore ? 'default' : 'pointer', opacity: logsLoadingMore ? 0.6 : 1, whiteSpace: 'nowrap' }}
+                >
+                  {logsLoadingMore ? 'Đang tải…' : 'Tải thêm'}
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -1592,7 +1796,7 @@ export default function DevConsole() {
                 />
                 <div style={{ fontSize: '11.5px', color: 'oklch(55% 0.015 250)', marginTop: '7px', lineHeight: 1.6 }}>
                   Dữ liệu cũ hơn mốc này sẽ được lưu trữ rồi xoá khỏi database. Tối thiểu {RETENTION_MIN_DAYS} ngày
-                  để trang Báo cáo (biểu đồ 7 ngày) còn dữ liệu.
+                  để trang Báo cáo còn dữ liệu — khung ngày của trang đó bám đúng theo con số này.
                 </div>
               </div>
               <div>
@@ -1754,7 +1958,7 @@ export default function DevConsole() {
             <div style={{ marginBottom: '22px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
                 <label style={{ fontSize: '13px', fontWeight: 600 }}>Công suất mặt trời</label>
-                <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '13px', color: ACCENT }}>{simSolar.toFixed(1)} kW</span>
+                <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '13px', color: ACCENT }}>{Math.round(simSolar * 1000).toLocaleString('vi-VN')} W</span>
               </div>
               <input type="range" min="0" max="5" step="0.1" value={simSolar} onChange={(e) => setSimSolar(parseFloat(e.target.value))} style={{ width: '100%', accentColor: ACCENT }} />
             </div>
@@ -1768,7 +1972,7 @@ export default function DevConsole() {
             <div style={{ marginBottom: '24px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
                 <label style={{ fontSize: '13px', fontWeight: 600 }}>Tải tiêu thụ</label>
-                <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '13px', color: ACCENT }}>{simLoad.toFixed(2)} kW</span>
+                <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '13px', color: ACCENT }}>{Math.round(simLoad * 1000).toLocaleString('vi-VN')} W</span>
               </div>
               <input type="range" min="0" max="3" step="0.1" value={simLoad} onChange={(e) => setSimLoad(parseFloat(e.target.value))} style={{ width: '100%', accentColor: ACCENT }} />
             </div>
