@@ -84,11 +84,11 @@ const AP_SSID_MAX_BYTES = 32;
 const AP_PASSWORD_MIN = 8;
 const AP_PASSWORD_MAX = 63;
 
-// Firmware version + OTA progress the device reports (migration 0015). Like
+// Firmware version + OTA progress the device reports (migrations 0015 + 0033). Like
 // the AP fields these are the device's own truth and live on `devices`, not on
 // every `telemetry` row. Firmware sends `fw_version` on (re)connect; the
-// `fw_status*` pair only while an OTA push is in flight.
-const FW_FIELDS = ["fw_version", "fw_status", "fw_status_detail"] as const;
+// `fw_status*` + `fw_progress` only while an OTA push is in flight.
+const FW_FIELDS = ["fw_version", "fw_status", "fw_status_detail", "fw_progress"] as const;
 
 // Statuses a DEVICE may report. 'pending' is deliberately absent: it means
 // "cloud has published the OTA command but the device hasn't spoken since"
@@ -445,6 +445,42 @@ Deno.serve(async (req) => {
           typeof detail === "string" && detail.trim()
             ? detail.trim().slice(0, FW_DETAIL_MAX)
             : null;
+
+        // Phần trăm đi cùng trạng thái của cùng một lần OTA. Chỉ nhận số nguyên
+        // trong miền schema cho phép; một giá trị hỏng không được làm rơi cả
+        // telemetry hoặc trạng thái hợp lệ còn lại trong bản tin.
+        if ("fw_progress" in payload) {
+          const progress = payload.fw_progress;
+          if (
+            typeof progress === "number" &&
+            Number.isInteger(progress) &&
+            progress >= 0 &&
+            progress <= 100
+          ) {
+            patch.fw_progress = progress;
+          } else {
+            console.warn(`ignoring invalid fw_progress from ${clientId}`);
+            await logEventThrottled(
+              device.owner_id, device.station_id, device.id,
+              "warn", "fw_report_rejected",
+              `${device.name} báo phần trăm OTA không hợp lệ ` +
+                `("${String(progress).slice(0, 40)}") — chỉ chấp nhận số nguyên từ 0 đến 100.`,
+              { client_id: clientId, reported: String(progress).slice(0, 80) },
+            );
+          }
+        } else if (status === "downloading") {
+          // Firmware cũ biết báo trạng thái nhưng chưa biết báo phần trăm. Xoá
+          // số 0 do cloud khởi tạo để UI không khẳng định sai rằng nó dừng ở 0%.
+          patch.fw_progress = null;
+        }
+
+        // Hai trạng thái này có ý nghĩa phần byte đã hoàn tất chắc chắn. Chuẩn
+        // hoá tại biên ingest để firmware tối giản không cần gửi thêm trường %.
+        if (status === "applying" || status === "success") {
+          patch.fw_progress = 100;
+        } else if (status === "idle") {
+          patch.fw_progress = null;
+        }
       }
     }
 
@@ -464,6 +500,7 @@ Deno.serve(async (req) => {
       if (target?.version === version) {
         patch.fw_status = "success";
         patch.fw_status_detail = null;
+        patch.fw_progress = 100;
         patch.fw_status_at = now;
       }
     }

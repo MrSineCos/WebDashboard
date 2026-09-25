@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useId, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useState } from 'react';
 import { supabase } from './supabaseClient.js';
 import { useAuth } from './AuthContext.jsx';
+import { localSnapshotToReading, useLocalConnection } from './LocalConnectionContext.jsx';
 import { tzStartOfDay } from './time.js';
 
 function mapRow(row) {
@@ -10,6 +11,7 @@ function mapRow(row) {
     solarKw: row.solar_kw,
     batteryPct: row.battery_pct,
     batteryVoltage: row.battery_voltage,
+    batteryCurrent: row.battery_current,
     loadW: row.load_w,
     // Nhiệt độ pack pin — KHÔNG phải nhiệt độ lõi MCU. Đại lượng đó từng có
     // (`mcu_temp_c`, migration 0017) nhưng đã bỏ hẳn ở 0029: cột không còn,
@@ -35,6 +37,7 @@ export function useTelemetry(stationId, { limit = 60 } = {}) {
   // hook trong file này.
   const { user } = useAuth();
   const userId = user?.id ?? null;
+  const local = useLocalConnection();
   const [readings, setReadings] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -80,9 +83,17 @@ export function useTelemetry(stationId, { limit = 60 } = {}) {
     };
   }, [userId, stationId, limit]);
 
-  const latest = readings.length ? readings[readings.length - 1] : null;
+  const displayReadings = useMemo(() => {
+    if (!local.connected || local.localStationId !== stationId) return readings;
+    const localRows = local.history.map(localSnapshotToReading).filter(Boolean);
+    return [...readings, ...localRows]
+      .sort((a, b) => new Date(a.ts) - new Date(b.ts))
+      .slice(-limit);
+  }, [readings, limit, stationId, local.connected, local.localStationId, local.history]);
 
-  return { readings, latest, loading };
+  const latest = displayReadings.length ? displayReadings[displayReadings.length - 1] : null;
+
+  return { readings: displayReadings, latest, loading: loading && !local.connected };
 }
 
 // Telemetry trong một khung thời gian trượt (windowMs tính ngược từ bây giờ),
@@ -100,6 +111,7 @@ export function useTelemetry(stationId, { limit = 60 } = {}) {
 export function useTelemetryWindow(stationId, windowMs, { maxRows = 3000 } = {}) {
   const { user } = useAuth();
   const userId = user?.id ?? null;
+  const local = useLocalConnection();
   const [readings, setReadings] = useState([]);
   const [loading, setLoading] = useState(true);
   const [truncated, setTruncated] = useState(false);
@@ -155,7 +167,18 @@ export function useTelemetryWindow(stationId, windowMs, { maxRows = 3000 } = {})
     };
   }, [userId, stationId, windowMs, maxRows]);
 
-  return { readings, loading, truncated };
+  const displayReadings = useMemo(() => {
+    if (!local.connected || local.localStationId !== stationId || !windowMs) return readings;
+    const cutoff = Date.now() - windowMs;
+    const localRows = local.history
+      .map(localSnapshotToReading)
+      .filter((row) => row && new Date(row.ts).getTime() >= cutoff);
+    return [...readings, ...localRows]
+      .sort((a, b) => new Date(a.ts) - new Date(b.ts))
+      .slice(-maxRows);
+  }, [readings, stationId, windowMs, maxRows, local.connected, local.localStationId, local.history]);
+
+  return { readings: displayReadings, loading: loading && !local.connected, truncated };
 }
 
 // All telemetry since midnight for one station, oldest-first, with a live
@@ -390,6 +413,8 @@ export function useIngestRate(stationId, { refreshMs = 60000 } = {}) {
 // trái ngược. Cần migration 0028 để Postgres thực sự đẩy sự kiện.
 export function useDevices() {
   const { user } = useAuth();
+  const local = useLocalConnection();
+  const { rememberDevices } = local;
   const userId = user?.id ?? null;
   // Hậu tố kênh riêng cho từng bản của hook — cùng lý do đã giải thích kỹ ở
   // useStations (lib/stations.js): supabase.channel(topic) trả về kênh ĐANG CÓ
@@ -449,6 +474,10 @@ export function useDevices() {
       supabase.removeChannel(channel);
     };
   }, [userId, channelSuffix, reloadKey]);
+
+  useEffect(() => {
+    rememberDevices(devices);
+  }, [devices, rememberDevices]);
 
   // Đọc lại `devices` mà KHÔNG bật lại `loading` — các cột do thiết bị báo về
   // (fw_version/fw_status, ap_ssid) đổi ngoài luồng thao tác của người dùng,
@@ -511,5 +540,39 @@ export function useDevices() {
     return invokeProvision({ device_id: id, action: 'list' });
   }
 
-  return { devices, registerDevice, removeDevice, provisionDevice, listDeviceCertificates, refreshDevices, loading };
+  const displayDevices = useMemo(() => {
+    if (!local.connected || !local.snapshot || !local.localStationId) return devices;
+    const index = devices.findIndex((device) => device.aws_thing_name === local.snapshot.device);
+    const patch = {
+      status: 'connected',
+      station_id: local.localStationId,
+      last_seen_at: local.snapshot.receivedAt,
+      uptime_s: Number(local.snapshot.uptime_s),
+      boot_count: Number(local.snapshot.boot_count),
+      fw_version: local.snapshot.fw_version,
+      fw_reported_at: local.snapshot.receivedAt,
+      ap_ssid: local.snapshot.ap_ssid,
+      ap_reported_at: local.snapshot.receivedAt,
+      local_connection: true,
+      local_mqtt_connected: Boolean(local.snapshot.mqtt_connected),
+      stm32_link: Boolean(local.snapshot.stm32_link),
+    };
+    if (index >= 0) {
+      return devices.map((device, i) => (i === index ? { ...device, ...patch } : device));
+    }
+    return [
+      ...devices,
+      {
+        id: `local:${local.snapshot.device}`,
+        owner_id: userId,
+        name: local.snapshot.device,
+        type: 'esp32',
+        aws_thing_name: local.snapshot.device,
+        created_at: local.snapshot.receivedAt,
+        ...patch,
+      },
+    ];
+  }, [devices, userId, local.connected, local.snapshot, local.localStationId]);
+
+  return { devices: displayDevices, registerDevice, removeDevice, provisionDevice, listDeviceCertificates, refreshDevices, loading: loading && !local.connected };
 }

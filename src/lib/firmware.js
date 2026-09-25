@@ -13,9 +13,8 @@ import { useAuth } from './AuthContext.jsx';
 //                khoá AWS để publish MQTT — cả hai đều không có ở client).
 //   * Trạng thái nạp → đọc thẳng `devices` (RLS select-own), xem useDevices().
 
-// Khớp FW_BOARD trong firmware/esp32s3.ino. Ảnh build cho board khác sẽ bị
-// chính firmware từ chối (`board_mismatch`) chứ cloud không kiểm được — bảng
-// `devices` chỉ có `type`, không có `board`.
+// Giá trị mặc định cho firmware ESP32-S3 hiện tại. Có thể đổi khi tải ảnh cho
+// board khác; firmware và metadata bản phát hành phải trùng nhau.
 export const DEFAULT_BOARD = 'esp32s3-solgrid';
 
 // Khớp file_size_limit của bucket `firmware` (migration 0015). Kiểm ở client
@@ -48,12 +47,14 @@ const FW_DETAIL_TEXT = {
   no_space: 'phân vùng OTA không đủ chỗ — chọn Partition Scheme có 2 app slot',
   no_content_length: 'máy chủ không trả Content-Length',
   http_begin: 'không mở được kết nối HTTPS tới Storage',
+  https_connection_failed: 'không kết nối được HTTPS tới Storage — kiểm tra Internet, DNS hoặc cấu hình CA',
+  'http_-1': 'không kết nối được HTTPS tới Storage — firmware cũ có thể đang dùng nhầm CA của AWS',
   wifi_down: 'thiết bị mất WiFi giữa chừng',
   bad_sha256_field: 'lệnh gửi xuống thiếu/sai trường sha256',
   bad_command: 'lệnh OTA không hợp lệ',
   activate_failed: 'không kích hoạt được phân vùng vừa ghi',
   already_running: 'thiết bị đã chạy đúng bản này',
-  ota_not_configured: 'firmware thiếu SUPABASE_ROOT_CA (docs/IOT.md mục 10.7)',
+  ota_not_configured: 'firmware OTA chưa được cấu hình (docs/IOT.md mục 10.7)',
   release_deleted: 'bản phát hành bị xoá khi thiết bị đang nạp dở',
 };
 
@@ -273,6 +274,8 @@ export function useFirmwareReleases() {
   // fw_status qua telemetry — đọc ở useDevices().
   async function pushOta({ releaseId, deviceId, stationId }) {
     if (!releaseId) return { error: new Error(OTA_ERROR_TEXT.invalid_params) };
+    const release = releases.find((item) => item.id === releaseId);
+    if (!release) return { error: new Error(OTA_ERROR_TEXT.release_not_found) };
     const body = { release_id: releaseId };
     if (deviceId) body.device_id = deviceId;
     else body.station_id = stationId;

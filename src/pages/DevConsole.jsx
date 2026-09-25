@@ -30,6 +30,7 @@ import {
   useRetention,
 } from '../lib/retention.js';
 import { useAuth } from '../lib/AuthContext.jsx';
+import { LocalConnectionBanner, useLocalConnection } from '../lib/LocalConnectionContext.jsx';
 import { useIsMobile } from '../lib/useIsMobile.js';
 import { userAvatarUrl } from '../lib/avatar.js';
 import Avatar from '../components/Avatar.jsx';
@@ -241,7 +242,7 @@ function sinceSeconds(ts) {
 // 90 giây là ngưỡng của chính hệ thống (mark_stale_offline, 0006) — dùng lại
 // đúng con số đó để dải này không bao giờ báo "đang nhận" trong khi đèn trạm
 // đã chuyển offline.
-function IngestStatus({ station, devices, hourlyCount }) {
+function IngestStatus({ station, devices, hourlyCount, localCount = null }) {
   // Nhịp đồng hồ 1 giây: con số phải TỰ CHẠY thì mới là bằng chứng đường ống
   // còn sống. Một mốc thời gian đứng im không phân biệt được với trang treo.
   const [, tick] = useState(0);
@@ -275,14 +276,16 @@ function IngestStatus({ station, devices, hourlyCount }) {
       : 'Đã ngừng nhận dữ liệu';
 
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', background: 'oklch(15% 0.02 250)', border: '1px solid oklch(28% 0.02 250)', borderRadius: '10px', padding: '10px 14px', marginBottom: '10px', fontFamily: "'IBM Plex Mono',monospace", fontSize: '12px' }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', background: 'oklch(15% 0.02 250)', border: '1px solid oklch(28% 0.02 250)', borderRadius: '10px', padding: '10px 14px', marginBottom: '10px', fontSize: '12.5px' }}>
       <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: color, flexShrink: 0 }} />
       <span style={{ color, fontWeight: 600 }}>{label}</span>
       {seenAt && (
         <span style={{ color: 'oklch(62% 0.015 250)' }}>· bản tin gần nhất {sinceSeconds(seenAt)}</span>
       )}
       <span style={{ color: 'oklch(62% 0.015 250)' }}>
-        · {hourlyCount == null ? '—' : hourlyCount.toLocaleString('vi-VN')} bản tin trong 1 giờ qua
+        · {localCount == null
+          ? `${hourlyCount == null ? '—' : hourlyCount.toLocaleString('vi-VN')} bản tin trong 1 giờ qua`
+          : `${localCount.toLocaleString('vi-VN')} mẫu local trong phiên này`}
       </span>
       <span style={{ color: 'oklch(62% 0.015 250)' }}>
         · {onlineCount}/{devices.length} thiết bị online
@@ -317,14 +320,14 @@ function LogRow({ item }) {
         onClick={hasMeta ? () => setOpen((v) => !v) : undefined}
         style={{ display: 'flex', gap: '10px', alignItems: 'baseline', cursor: hasMeta ? 'pointer' : 'default' }}
       >
-        <span style={{ color: 'oklch(52% 0.015 250)', flexShrink: 0, whiteSpace: 'nowrap' }}>{formatLogTime(item.createdAt)}</span>
+        <span style={{ fontFamily: "'IBM Plex Mono',monospace", color: 'oklch(52% 0.015 250)', flexShrink: 0, whiteSpace: 'nowrap' }}>{formatLogTime(item.createdAt)}</span>
         <span style={{ color: level.color, fontWeight: 600, flexShrink: 0, width: '54px' }}>{level.label}</span>
         <span style={{ flexShrink: 0, fontSize: '10.5px', fontWeight: 600, letterSpacing: '0.03em', color: source.color, background: 'oklch(22% 0.02 250)', border: '1px solid oklch(30% 0.02 250)', borderRadius: '5px', padding: '2px 7px', whiteSpace: 'nowrap' }}>
           {source.label}
         </span>
         <span style={{ color: 'oklch(85% 0.01 250)', minWidth: 0, wordBreak: 'break-word', flex: 1 }}>
           {item.message}
-          <span style={{ color: 'oklch(45% 0.015 250)', fontSize: '11px', marginLeft: '8px', whiteSpace: 'nowrap' }}>
+          <span style={{ fontFamily: "'IBM Plex Mono',monospace", color: 'oklch(45% 0.015 250)', fontSize: '11px', marginLeft: '8px', whiteSpace: 'nowrap' }}>
             {item.event}
           </span>
         </span>
@@ -333,7 +336,7 @@ function LogRow({ item }) {
         )}
       </div>
       {open && hasMeta && (
-        <pre style={{ margin: '8px 0 2px', padding: '10px 12px', background: 'oklch(14% 0.02 250)', border: '1px solid oklch(26% 0.02 250)', borderRadius: '8px', color: 'oklch(72% 0.02 250)', fontSize: '11.5px', lineHeight: 1.6, overflowX: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+        <pre style={{ margin: '8px 0 2px', padding: '10px 12px', background: 'oklch(14% 0.02 250)', border: '1px solid oklch(26% 0.02 250)', borderRadius: '8px', color: 'oklch(72% 0.02 250)', fontFamily: "'IBM Plex Mono',monospace", fontSize: '11.5px', lineHeight: 1.6, overflowX: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
           {JSON.stringify(item.meta, null, 2)}
         </pre>
       )}
@@ -710,6 +713,7 @@ export default function DevConsole() {
   // firmware là hỏng phần cứng thật, không hoàn tác từ xa được.
   const [selectedReleaseId, setSelectedReleaseId] = useState('');
   const [fwFile, setFwFile] = useState(null);
+  // Mã board mặc định chỉ là gợi ý; có thể đổi khi tải ảnh cho loại board khác.
   const [fwBoard, setFwBoard] = useState(DEFAULT_BOARD);
   const [fwVersion, setFwVersion] = useState('');
   const [fwNotes, setFwNotes] = useState('');
@@ -741,6 +745,7 @@ export default function DevConsole() {
   const fwFileInputRef = useRef(null);
 
   const { stations, station: currentStation, selectStation, loading: stationsLoading } = useStations();
+  const local = useLocalConnection();
   const { devices, removeDevice, provisionDevice, listDeviceCertificates, refreshDevices } = useDevices();
   const { releases, loading: releasesLoading, uploadRelease, deleteRelease, pushOta } = useFirmwareReleases();
   const { loads: stationLoads } = useLoads(currentStation?.id);
@@ -896,10 +901,12 @@ export default function DevConsole() {
   // Có hạn 5 phút vì "đang chạy" không đảm bảo sẽ kết thúc: thiết bị offline
   // lúc publish sẽ kẹt ở 'pending' vô hạn (QoS 1 không giao lại cho thiết bị
   // đang offline), và hỏi lại server 5 giây một lần mãi mãi là vô nghĩa. Mỗi
-  // lần đẩy mới tăng `otaWatchKey` → mở lại một cửa sổ theo dõi mới.
+  // lần đẩy mới tăng `otaWatchKey` → mở lại một cửa sổ theo dõi mới. Poll ngay
+  // cả khi lần ghi `pending` ở server bị lỗi: MCU vẫn có thể đã nhận lệnh và
+  // bản tin telemetry tiếp theo sẽ khôi phục trạng thái thật.
   const otaInFlight = devices.some((d) => FW_IN_FLIGHT.has(d.fw_status));
   useEffect(() => {
-    if (!otaInFlight) return;
+    if (!otaInFlight && otaWatchKey === 0) return;
     const deadline = Date.now() + 5 * 60 * 1000;
     const timer = setInterval(() => {
       if (Date.now() >= deadline) {
@@ -1113,7 +1120,10 @@ export default function DevConsole() {
   // `devices.status='connected'` mỗi bản tin, `mark_stale_offline` (0006) gạt
   // về 'disconnected' sau 90 giây im lặng. Kết hợp với `stationOffline` để ô
   // này không mâu thuẫn với danh sách thiết bị ngay bên dưới.
-  const diagMqttOnline = !!diagDevice && !stationOffline && diagDevice.status === 'connected';
+  const diagMqttOnline = !!diagDevice && (diagDevice.local_connection
+    ? diagDevice.local_mqtt_connected
+    : !stationOffline && diagDevice.status === 'connected');
+  const localForCurrent = local.connected && local.localStationId === currentStation.id ? local.snapshot : null;
   // "Đang chạy" xác định bằng phiên bản THIẾT BỊ báo về, không phải bằng bản
   // cloud đã đẩy — đúng nguyên tắc thiết bị là nguồn sự thật (docs/IOT.md 10.6).
   const runningVersions = new Set(devices.map((d) => d.fw_version).filter(Boolean));
@@ -1131,16 +1141,17 @@ export default function DevConsole() {
       onToggleStationMenu={() => setStationMenuOpen((v) => !v)}
       onCloseStationMenu={() => setStationMenuOpen(false)}
     >
+        <LocalConnectionBanner dark stationId={currentStation.id} />
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', background: 'oklch(28% 0.06 70 / 0.35)', border: '1px solid oklch(45% 0.1 70 / 0.5)', borderRadius: '10px', padding: '12px 16px', marginBottom: '24px' }}>
           <svg width="16" height="16" viewBox="0 0 20 20" style={{ flexShrink: 0 }}><path d="M10 3l8 14H2z" fill="none" stroke="oklch(78% 0.14 70)" strokeWidth="1.6" strokeLinejoin="round" /><line x1="10" y1="8" x2="10" y2="12" stroke="oklch(78% 0.14 70)" strokeWidth="1.6" strokeLinecap="round" /><circle cx="10" cy="14.7" r="0.9" fill="oklch(78% 0.14 70)" /></svg>
-          <span style={{ fontSize: '12.5px', color: 'oklch(85% 0.03 70)', fontFamily: "'IBM Plex Mono',monospace" }}>Chế độ Nhà phát triển — thay đổi ở đây ảnh hưởng trực tiếp đến phần cứng và giao diện người dùng.</span>
+          <span style={{ fontSize: '13px', color: 'oklch(85% 0.03 70)' }}>Chế độ Nhà phát triển — thay đổi ở đây ảnh hưởng trực tiếp đến phần cứng và giao diện người dùng.</span>
         </div>
 
         {/* OVERVIEW */}
         <div id="dsec-overview" style={{ scrollMarginTop: '24px', marginBottom: '32px' }}>
           <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '14px', flexWrap: 'wrap', marginBottom: '16px' }}>
             <div>
-              <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '22px', fontWeight: 700, margin: '0 0 4px' }}>Tổng quan thiết bị</h1>
+              <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '26px', fontWeight: 700, margin: '0 0 4px' }}>Tổng quan thiết bị</h1>
               <p style={{ fontSize: '13px', color: 'oklch(62% 0.015 250)', margin: 0 }}>Chỉ số chẩn đoán thiết bị báo về cùng mỗi bản tin telemetry</p>
             </div>
             {/* Chỉ hiện bộ chọn khi thật sự có nhiều hơn một ESP32 — với trạm
@@ -1166,6 +1177,16 @@ export default function DevConsole() {
               </div>
             )}
           </div>
+
+          {localForCurrent && (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px,1fr))', gap: '12px', marginBottom: '16px' }}>
+              <DiagCard label="PV cục bộ" value={`${Number(localForCurrent.solar_kw).toFixed(3)} kW`} />
+              <DiagCard label="Pin" value={`${Math.round(Number(localForCurrent.battery_pct))}% · ${Number(localForCurrent.battery_voltage).toFixed(1)} V`} />
+              <DiagCard label="Tải" value={`${Math.round(Number(localForCurrent.load_w))} W`} />
+              <DiagCard label="Nhiệt độ pin" value={`${Number(localForCurrent.temp_c).toFixed(1)} °C`} />
+              <DiagCard label="Liên kết STM32" value={localForCurrent.stm32_link ? 'Đang phản hồi' : 'Mất kết nối'} />
+            </div>
+          )}
 
           {esp32Devices.length === 0 ? (
             <div style={{ background: 'oklch(19% 0.022 250)', border: '1px solid oklch(30% 0.02 250)', borderRadius: '12px', padding: '20px', marginBottom: '16px', fontSize: '12.5px', color: 'oklch(62% 0.015 250)' }}>
@@ -1196,7 +1217,7 @@ export default function DevConsole() {
           )}
 
           <div style={{ background: 'oklch(19% 0.022 250)', border: '1px solid oklch(30% 0.02 250)', borderRadius: '12px', padding: '20px' }}>
-            <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '15px', fontWeight: 700, margin: '0 0 14px' }}>Thiết bị đang hoạt động</h2>
+            <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '17px', fontWeight: 700, margin: '0 0 14px' }}>Thiết bị đang hoạt động</h2>
             {stationDevices.length === 0 ? (
               <div style={{ padding: '18px 2px', fontSize: '12.5px', color: 'oklch(62% 0.015 250)' }}>Chưa có thiết bị nào được đăng ký cho trạm này.</div>
             ) : stationDevices.map((d) => {
@@ -1226,7 +1247,7 @@ export default function DevConsole() {
 
         {/* FIRMWARE */}
         <div id="dsec-firmware" style={{ scrollMarginTop: '24px', marginBottom: '32px' }}>
-          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '22px', fontWeight: 700, margin: '0 0 4px' }}>Quản lý Firmware MCU</h1>
+          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '26px', fontWeight: 700, margin: '0 0 4px' }}>Quản lý Firmware MCU</h1>
           <p style={{ fontSize: '13px', color: 'oklch(62% 0.015 250)', margin: '0 0 20px' }}>Tải bản .bin lên, đẩy OTA qua AWS IoT và theo dõi phiên bản thiết bị báo về</p>
 
           {/* Thiết bị + đích đẩy. Bản firmware phải chọn tường minh ở đây: đẩy
@@ -1234,7 +1255,7 @@ export default function DevConsole() {
           <div style={{ background: 'oklch(19% 0.022 250)', border: '1px solid oklch(30% 0.02 250)', borderRadius: '12px', padding: '20px', marginBottom: '16px' }}>
             <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '14px', flexWrap: 'wrap', marginBottom: '14px' }}>
               <div>
-                <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '15px', fontWeight: 700, margin: '0 0 4px' }}>Thiết bị</h2>
+                <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '17px', fontWeight: 700, margin: '0 0 4px' }}>Thiết bị</h2>
                 <p style={{ fontSize: '12px', color: 'oklch(62% 0.015 250)', margin: 0 }}>Phiên bản do thiết bị tự báo về — chênh với bản đã đẩy nghĩa là nạp chưa xong</p>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
@@ -1267,6 +1288,25 @@ export default function DevConsole() {
               const online = !stationOffline && d.status === 'connected';
               const statusMeta = FW_STATUS_META[d.fw_status] ?? FW_STATUS_META.idle;
               const detailText = fwStatusDetailText(d.fw_status_detail);
+              const hasProgressField = Object.prototype.hasOwnProperty.call(d, 'fw_progress');
+              const reportedOtaProgress = Number.isInteger(d.fw_progress)
+                ? Math.max(0, Math.min(100, d.fw_progress))
+                : null;
+              // `pending` là một bước thật của luồng OTA: cloud đã gửi lệnh và
+              // đang chờ MCU xác nhận. Luôn hiện 0% ở bước này, kể cả migration
+              // 0033 chưa được áp dụng hoặc firmware cũ chưa biết báo phần trăm.
+              const otaProgress = reportedOtaProgress ?? 0;
+              // Giữ lại vị trí bị dừng khi thất bại để chẩn đoán mạng/flash;
+              // không giữ thanh 100% mãi sau một lần cập nhật thành công.
+              const showOtaProgress = FW_IN_FLIGHT.has(d.fw_status) ||
+                (d.fw_status === 'failed' && reportedOtaProgress !== null);
+              const otaProgressLabel = d.fw_status === 'pending'
+                ? 'Chờ MCU xác nhận lệnh OTA'
+                : d.fw_status === 'failed'
+                  ? 'Dừng tại'
+                  : reportedOtaProgress === null
+                    ? 'MCU đang xử lý (chưa báo %)'
+                    : 'Tiến trình OTA';
               // Bản cloud đã ra lệnh nạp. Hàng có thể đã bị xoá khỏi catalog —
               // khi đó chỉ còn biết là "đã đẩy một bản không còn tồn tại".
               const target = d.fw_target_id ? releases.find((r) => r.id === d.fw_target_id) : null;
@@ -1290,6 +1330,29 @@ export default function DevConsole() {
                       {detailText && (
                         <div style={{ fontSize: '11.5px', color: d.fw_status === 'failed' ? 'oklch(75% 0.14 25)' : 'oklch(58% 0.015 250)', marginTop: '3px' }}>{detailText}</div>
                       )}
+                      {showOtaProgress && (
+                        <div style={{ width: 'min(360px, 72vw)', marginTop: '8px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', marginBottom: '4px', fontSize: '11px', color: d.fw_status === 'failed' ? 'oklch(75% 0.14 25)' : 'oklch(68% 0.02 250)' }}>
+                            <span>{otaProgressLabel}</span>
+                            <strong style={{ fontFamily: "'IBM Plex Mono',monospace", color: d.fw_status === 'failed' ? 'oklch(78% 0.14 25)' : 'oklch(82% 0.12 190)' }}>{reportedOtaProgress === null && d.fw_status !== 'pending' ? '—' : `${otaProgress}%`}</strong>
+                          </div>
+                          <div
+                            role="progressbar"
+                            aria-label={`Tiến trình OTA của ${d.name}`}
+                            aria-valuemin={0}
+                            aria-valuemax={100}
+                            aria-valuenow={otaProgress}
+                            style={{ height: '6px', overflow: 'hidden', borderRadius: '999px', background: 'oklch(27% 0.02 250)' }}
+                          >
+                            <div style={{ width: `${otaProgress}%`, height: '100%', borderRadius: 'inherit', background: d.fw_status === 'failed' ? 'oklch(65% 0.16 25)' : ACCENT, transition: 'width 240ms ease' }} />
+                          </div>
+                          {!hasProgressField && (
+                            <div style={{ marginTop: '5px', fontSize: '10.5px', color: 'oklch(76% 0.11 70)', lineHeight: 1.45 }}>
+                              Máy chủ chưa có trường tiến trình — cần áp dụng migration 0033 và deploy lại hai Edge Function OTA.
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
@@ -1298,7 +1361,7 @@ export default function DevConsole() {
                       onClick={() => handlePushOta(d.id)}
                       disabled={!selectedReleaseId || pushingTarget !== null}
                       title={selectedReleaseId ? undefined : 'Chọn một bản firmware trước'}
-                      style={{ padding: '7px 14px', borderRadius: '8px', border: '1px solid oklch(38% 0.03 250)', background: 'oklch(22% 0.025 250)', fontSize: '12px', fontWeight: 600, color: 'oklch(85% 0.01 250)', cursor: (!selectedReleaseId || pushingTarget !== null) ? 'not-allowed' : 'pointer', opacity: (!selectedReleaseId || pushingTarget !== null) ? 0.5 : 1, fontFamily: "'IBM Plex Mono',monospace", whiteSpace: 'nowrap' }}
+                      style={{ padding: '7px 14px', borderRadius: '8px', border: '1px solid oklch(38% 0.03 250)', background: 'oklch(22% 0.025 250)', fontSize: '12px', fontWeight: 600, color: 'oklch(85% 0.01 250)', cursor: (!selectedReleaseId || pushingTarget !== null) ? 'not-allowed' : 'pointer', opacity: (!selectedReleaseId || pushingTarget !== null) ? 0.5 : 1, fontFamily: "'Manrope',sans-serif", whiteSpace: 'nowrap' }}
                     >
                       {busy ? 'Đang gửi…' : 'Cập nhật'}
                     </button>
@@ -1321,7 +1384,7 @@ export default function DevConsole() {
               firmware_releases. Hash tính ngay tại trình duyệt từ đúng bytes
               sắp gửi đi — firmware kiểm lại chuỗi này trước khi nạp. */}
           <div style={{ background: 'oklch(19% 0.022 250)', border: '1px solid oklch(30% 0.02 250)', borderRadius: '12px', padding: '20px', marginBottom: '16px' }}>
-            <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '15px', fontWeight: 700, margin: '0 0 4px' }}>Tải bản firmware mới lên</h2>
+            <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '17px', fontWeight: 700, margin: '0 0 4px' }}>Tải bản firmware mới lên</h2>
             <p style={{ fontSize: '12.5px', color: 'oklch(62% 0.015 250)', margin: '0 0 14px' }}>Định dạng .bin, biên dịch từ PlatformIO/Arduino IDE · tối đa {formatBytes(FIRMWARE_MAX_BYTES)}</p>
 
             <input
@@ -1382,14 +1445,14 @@ export default function DevConsole() {
               <div style={{ fontSize: '12.5px', color: 'oklch(80% 0.14 25)', lineHeight: 1.6, marginTop: '12px' }}>{fwUploadError}</div>
             )}
             <p style={{ fontSize: '11.5px', color: 'oklch(55% 0.015 250)', margin: '14px 0 0', lineHeight: 1.6 }}>
-              <strong>Phiên bản</strong> phải trùng <span style={{ fontFamily: "'IBM Plex Mono',monospace", color: 'oklch(72% 0.01 250)' }}>FW_VERSION</span> và <strong>Board</strong> phải trùng <span style={{ fontFamily: "'IBM Plex Mono',monospace", color: 'oklch(72% 0.01 250)' }}>FW_BOARD</span> trong <span style={{ fontFamily: "'IBM Plex Mono',monospace", color: 'oklch(72% 0.01 250)' }}>.ino</span> của bản build này — thiết bị dùng hai chuỗi đó để từ chối ảnh sai board và để cloud biết đã nạp xong. Một bản đã tải lên là bất biến: sửa = tải lên phiên bản mới.
+              <strong>Phiên bản</strong> phải trùng <span style={{ fontFamily: "'IBM Plex Mono',monospace", color: 'oklch(72% 0.01 250)' }}>FW_VERSION</span> và <strong>Board</strong> phải trùng <span style={{ fontFamily: "'IBM Plex Mono',monospace", color: 'oklch(72% 0.01 250)' }}>FW_BOARD</span> trong <span style={{ fontFamily: "'IBM Plex Mono',monospace", color: 'oklch(72% 0.01 250)' }}>secrets.h</span>. Board là mã loại firmware; tên thiết bị hiển thị có thể khác. Một bản đã tải lên là bất biến: sai metadata thì xoá bản đó và tải lại file .bin.
             </p>
           </div>
 
           {/* Catalog. Rollback = chọn một bản cũ ở đây rồi bấm "Cập nhật" ở khối
               Thiết bị — không có đường nào khác, và cũng không cần. */}
           <div style={{ background: 'oklch(19% 0.022 250)', border: '1px solid oklch(30% 0.02 250)', borderRadius: '12px', padding: '20px' }}>
-            <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '15px', fontWeight: 700, margin: '0 0 4px' }}>Bản phát hành</h2>
+            <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '17px', fontWeight: 700, margin: '0 0 4px' }}>Bản phát hành</h2>
             <p style={{ fontSize: '12px', color: 'oklch(62% 0.015 250)', margin: '0 0 14px' }}>Bấm để chọn bản sẽ đẩy — chọn một bản cũ hơn chính là rollback</p>
 
             {releasesLoading ? (
@@ -1442,7 +1505,7 @@ export default function DevConsole() {
 
         {/* MODULE VISIBILITY */}
         <div id="dsec-modules" style={{ scrollMarginTop: '24px', marginBottom: '32px' }}>
-          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '22px', fontWeight: 700, margin: '0 0 4px' }}>Hiển thị module trên giao diện người dùng</h1>
+          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '26px', fontWeight: 700, margin: '0 0 4px' }}>Hiển thị module trên giao diện người dùng</h1>
           <p style={{ fontSize: '13px', color: 'oklch(62% 0.015 250)', margin: '0 0 20px' }}>Bật/tắt các khối hiển thị trên trang Tổng quan của người dùng cuối — riêng cho trạm <strong>{currentStation.name}</strong></p>
 
           <div style={lockedWhileLoading(settings.loading)}>
@@ -1463,7 +1526,7 @@ export default function DevConsole() {
 
         {/* BATTERY PROTECTION THRESHOLDS */}
         <div id="dsec-battery" style={{ scrollMarginTop: '24px', marginBottom: '32px' }}>
-          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '22px', fontWeight: 700, margin: '0 0 4px' }}>Ngưỡng sạc / xả pin</h1>
+          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '26px', fontWeight: 700, margin: '0 0 4px' }}>Ngưỡng sạc / xả pin</h1>
           <p style={{ fontSize: '13px', color: 'oklch(62% 0.015 250)', margin: '0 0 20px' }}>Cấu hình ngưỡng kỹ thuật cho từng mức Chế độ bảo vệ pin — riêng cho trạm <strong>{currentStation.name}</strong></p>
 
           <div style={{ display: 'flex', gap: '8px', marginBottom: '16px', flexWrap: 'wrap' }}>
@@ -1474,7 +1537,7 @@ export default function DevConsole() {
 
           <div style={lockedWhileLoading(settings.loading)}>
           <div style={{ background: 'oklch(19% 0.022 250)', border: '1px solid oklch(30% 0.02 250)', borderRadius: '12px', padding: '20px', marginBottom: '16px' }}>
-            <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '15px', fontWeight: 700, margin: '0 0 4px' }}>Mô tả hiển thị cho người dùng</h2>
+            <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '17px', fontWeight: 700, margin: '0 0 4px' }}>Mô tả hiển thị cho người dùng</h2>
             <p style={{ fontSize: '12px', color: 'oklch(62% 0.015 250)', margin: '0 0 12px' }}>Nội dung xuất hiện trên thẻ chọn chế độ ở giao diện người dùng cuối, cho mức đang chỉnh: <strong>{MODE_LABELS[editingMode]}</strong></p>
             <textarea
               value={editing.desc}
@@ -1485,7 +1548,7 @@ export default function DevConsole() {
           </div>
 
           <div style={{ background: 'oklch(19% 0.022 250)', border: '1px solid oklch(30% 0.02 250)', borderRadius: '12px', padding: '24px', marginBottom: '16px' }}>
-            <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '15px', fontWeight: 700, margin: '0 0 18px' }}>Ngưỡng kỹ thuật</h2>
+            <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '17px', fontWeight: 700, margin: '0 0 18px' }}>Ngưỡng kỹ thuật</h2>
 
             <div style={{ marginBottom: '22px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
@@ -1541,7 +1604,7 @@ export default function DevConsole() {
 
         {/* CALIBRATION */}
         <div id="dsec-calibration" style={{ scrollMarginTop: '24px', marginBottom: '32px' }}>
-          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '22px', fontWeight: 700, margin: '0 0 4px' }}>Hiệu chỉnh cảm biến<DemoBadge /></h1>
+          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '26px', fontWeight: 700, margin: '0 0 4px' }}>Hiệu chỉnh cảm biến<DemoBadge /></h1>
           <p style={{ fontSize: '13px', color: 'oklch(62% 0.015 250)', margin: '0 0 20px' }}>Điều chỉnh hệ số nhân &amp; độ lệch để bù sai số ADC phần cứng</p>
 
           <div style={{ background: 'oklch(19% 0.022 250)', border: '1px solid oklch(30% 0.02 250)', borderRadius: '12px', padding: '20px' }}>
@@ -1569,11 +1632,11 @@ export default function DevConsole() {
 
         {/* NETWORK */}
         <div id="dsec-network" style={{ scrollMarginTop: '24px', marginBottom: '32px' }}>
-          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '22px', fontWeight: 700, margin: '0 0 4px' }}>Cấu hình mạng</h1>
+          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '26px', fontWeight: 700, margin: '0 0 4px' }}>Cấu hình mạng</h1>
           <p style={{ fontSize: '13px', color: 'oklch(62% 0.015 250)', margin: '0 0 20px' }}>Điểm phát WiFi cục bộ và xác thực thiết bị</p>
 
           <div style={{ background: 'oklch(19% 0.022 250)', border: '1px solid oklch(30% 0.02 250)', borderRadius: '12px', padding: '20px', marginBottom: '16px' }}>
-            <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '15px', fontWeight: 700, margin: '0 0 6px' }}>Điểm phát WiFi (Access Point)</h2>
+            <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '17px', fontWeight: 700, margin: '0 0 6px' }}>Điểm phát WiFi (Access Point)</h2>
             <p style={{ fontSize: '12px', color: 'oklch(62% 0.015 250)', margin: '0 0 16px', lineHeight: 1.55 }}>
               Mỗi ESP32-S3 tự phát một mạng WiFi riêng để truy cập tại chỗ khi trạm mất internet — kết nối vào mạng của thiết bị rồi mở <span style={{ fontFamily: "'IBM Plex Mono',monospace", color: 'oklch(80% 0.01 250)' }}>http://192.168.4.1</span>.
             </p>
@@ -1615,7 +1678,7 @@ export default function DevConsole() {
           </div>
 
           <div style={{ background: 'oklch(19% 0.022 250)', border: '1px solid oklch(30% 0.02 250)', borderRadius: '12px', padding: '20px' }}>
-            <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '15px', fontWeight: 700, margin: '0 0 6px' }}>Xác thực thiết bị (AWS IoT X.509)</h2>
+            <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '17px', fontWeight: 700, margin: '0 0 6px' }}>Xác thực thiết bị (AWS IoT X.509)</h2>
             <p style={{ fontSize: '12px', color: 'oklch(62% 0.015 250)', margin: '0 0 14px', lineHeight: 1.55 }}>
               Mỗi thiết bị xác thực với AWS IoT Core bằng chứng chỉ X.509 riêng (quản lý trong AWS, không hiển thị ở đây). Dữ liệu đẩy về server qua Edge Function <span style={{ fontFamily: "'IBM Plex Mono',monospace", color: 'oklch(80% 0.01 250)' }}>ingest-telemetry</span>. Khoá bí mật của rule nằm phía server. Hướng dẫn cấp chứng chỉ: <span style={{ fontFamily: "'IBM Plex Mono',monospace", color: 'oklch(80% 0.01 250)' }}>docs/IOT.md</span>.
             </p>
@@ -1645,7 +1708,7 @@ export default function DevConsole() {
         <div id="dsec-logs" style={{ scrollMarginTop: '24px', marginBottom: '32px' }}>
           <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '14px', flexWrap: 'wrap', marginBottom: '16px' }}>
             <div>
-              <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '22px', fontWeight: 700, margin: '0 0 4px' }}>Nhật ký hệ thống</h1>
+              <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '26px', fontWeight: 700, margin: '0 0 4px' }}>Nhật ký hệ thống</h1>
               <p style={{ fontSize: '13px', color: 'oklch(62% 0.015 250)', margin: 0 }}>
                 Sự kiện thật do thiết bị và server ghi lại — sự cố vận hành, kết nối thiết bị, điều khiển tải, thay đổi cấu hình, firmware và dọn dữ liệu
               </p>
@@ -1692,16 +1755,17 @@ export default function DevConsole() {
             value={logSearch}
             onChange={(e) => setLogSearch(e.target.value)}
             placeholder="Tìm trong nhật ký — nội dung hoặc mã sự kiện (vd: overtemp, firmware, tải)"
-            style={{ ...darkFieldStyle, marginBottom: '10px' }}
+            style={{ ...darkFieldStyle, marginBottom: '10px', fontFamily: "'Manrope',sans-serif" }}
           />
 
           <IngestStatus
             station={currentStation}
             devices={stationDevices}
             hourlyCount={ingestRate}
+            localCount={localForCurrent ? local.history.length : null}
           />
 
-          <div style={{ background: 'oklch(9% 0.015 250)', border: '1px solid oklch(30% 0.02 250)', borderRadius: '12px', padding: '16px 18px', fontFamily: "'IBM Plex Mono',monospace", fontSize: '12.5px', maxHeight: '520px', overflowY: 'auto' }}>
+          <div style={{ background: 'oklch(9% 0.015 250)', border: '1px solid oklch(30% 0.02 250)', borderRadius: '12px', padding: '16px 18px', fontSize: '13px', lineHeight: 1.55, maxHeight: '520px', overflowY: 'auto' }}>
             {logsLoading ? (
               <div style={{ color: 'oklch(55% 0.015 250)', padding: '6px 0' }}>Đang tải nhật ký…</div>
             ) : logsError ? (
@@ -1743,7 +1807,7 @@ export default function DevConsole() {
 
         {/* RETENTION / ARCHIVE */}
         <div id="dsec-retention" style={{ scrollMarginTop: '24px', marginBottom: '32px' }}>
-          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '22px', fontWeight: 700, margin: '0 0 4px' }}>Lưu trữ &amp; dọn dữ liệu</h1>
+          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '26px', fontWeight: 700, margin: '0 0 4px' }}>Lưu trữ &amp; dọn dữ liệu</h1>
           <p style={{ fontSize: '13px', color: 'oklch(62% 0.015 250)', margin: '0 0 20px' }}>
             Giữ database trong hạn mức bằng cách nén dữ liệu cũ theo tháng và chuyển sang Storage
           </p>
@@ -1941,7 +2005,7 @@ export default function DevConsole() {
 
         {/* SIMULATION */}
         <div id="dsec-simulation" style={{ scrollMarginTop: '24px', marginBottom: '40px' }}>
-          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '22px', fontWeight: 700, margin: '0 0 4px' }}>Chế độ mô phỏng dữ liệu<DemoBadge /></h1>
+          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '26px', fontWeight: 700, margin: '0 0 4px' }}>Chế độ mô phỏng dữ liệu<DemoBadge /></h1>
           <p style={{ fontSize: '13px', color: 'oklch(62% 0.015 250)', margin: '0 0 20px' }}>Giả lập dữ liệu cảm biến để phát triển UI khi chưa có phần cứng</p>
 
           <div style={{ background: 'oklch(19% 0.022 250)', border: '1px solid oklch(30% 0.02 250)', borderRadius: '12px', padding: '20px', marginBottom: '16px' }}>
@@ -1982,7 +2046,7 @@ export default function DevConsole() {
 
         {/* ACCOUNT */}
         <div id="dsec-account" style={{ scrollMarginTop: '24px', marginBottom: '40px' }}>
-          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '22px', fontWeight: 700, margin: '0 0 4px' }}>Tài khoản</h1>
+          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '26px', fontWeight: 700, margin: '0 0 4px' }}>Tài khoản</h1>
           <p style={{ fontSize: '13px', color: 'oklch(62% 0.015 250)', margin: '0 0 20px' }}>Quản lý phiên đăng nhập của quản trị viên</p>
 
           <div style={{ background: 'oklch(19% 0.022 250)', border: '1px solid oklch(30% 0.02 250)', borderRadius: '12px', padding: '20px', marginBottom: '16px' }}>
@@ -2000,7 +2064,7 @@ export default function DevConsole() {
           </div>
 
           <div style={{ background: 'oklch(19% 0.022 250)', border: '1px solid oklch(30% 0.02 250)', borderRadius: '12px', padding: '20px' }}>
-            <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '15px', fontWeight: 700, margin: '0 0 6px' }}>Phiên đăng nhập</h2>
+            <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '17px', fontWeight: 700, margin: '0 0 6px' }}>Phiên đăng nhập</h2>
             <p style={{ fontSize: '12.5px', color: 'oklch(62% 0.015 250)', margin: '0 0 16px' }}>Đăng xuất khỏi phiên hiện tại hoặc chuyển sang tài khoản khác.</p>
             <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
               <button onClick={handleSignOut} disabled={signingOut} style={{ padding: '11px 20px', borderRadius: '8px', border: 'none', background: 'oklch(45% 0.16 25)', color: 'white', fontSize: '13.5px', fontWeight: 700, cursor: 'pointer', opacity: signingOut ? 0.7 : 1 }}>{signingOut ? 'Đang đăng xuất…' : 'Đăng xuất'}</button>

@@ -84,6 +84,12 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     if (!userId) return;
     let cancelled = false;
+    const roleCacheKey = `solgrid.auth.role.${userId}`;
+    const cachedRole = localStorage.getItem(roleCacheKey);
+    if (cachedRole === 'admin' || cachedRole === 'user') {
+      setFetchedRole(cachedRole);
+      setFetchedRoleUserId(userId);
+    }
     supabase
       .from('profiles')
       .select('role')
@@ -91,8 +97,12 @@ export function AuthProvider({ children }) {
       .single()
       .then(({ data }) => {
         if (cancelled) return;
-        setFetchedRole(data?.role ?? 'user');
+        // Giữ role đã cache khi app đang ở WiFi local không có Internet. Khi
+        // cloud truy cập được, dữ liệu server luôn ghi đè và làm mới cache.
+        const nextRole = data?.role ?? cachedRole ?? 'user';
+        setFetchedRole(nextRole);
         setFetchedRoleUserId(userId);
+        if (data?.role) localStorage.setItem(roleCacheKey, data.role);
       });
     return () => {
       cancelled = true;

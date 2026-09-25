@@ -198,7 +198,7 @@ export default function DevStations() {
       onToggleStationMenu={() => setStationMenuOpen((v) => !v)}
       onCloseStationMenu={() => setStationMenuOpen(false)}
     >
-      <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '22px', fontWeight: 700, margin: '0 0 4px' }}>Quản lý trạm</h1>
+      <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '26px', fontWeight: 700, margin: '0 0 4px' }}>Quản lý trạm</h1>
       <p style={{ fontSize: '13px', color: 'oklch(62% 0.015 250)', margin: '0 0 8px' }}>Thêm/xóa trạm, đăng ký thiết bị ESP32 gắn vào từng trạm để chúng kết nối đúng nơi</p>
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontFamily: "'IBM Plex Mono',monospace", fontSize: '11.5px', color: 'oklch(62% 0.015 250)', marginBottom: '20px' }}>
         <span>Owner UUID (dùng khi đăng ký thủ công theo docs/IOT.md): {user.id}</span>

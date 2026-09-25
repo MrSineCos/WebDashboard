@@ -86,8 +86,9 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
-// Matches docs/IOT.md §4.1 and provision_device.py: publish own telemetry, and
-// subscribe/receive load-control commands on this thing's own topic only.
+// Matches docs/IOT.md §4.1 and provision_device.py. Jobs permissions are
+// scoped to this certificate's Thing: firmware subscribes to notify-next and
+// start-next responses, then publishes start-next and per-job updates.
 function policyDocument(region: string, accountId: string): string {
   return JSON.stringify({
     Version: "2012-10-17",
@@ -100,14 +101,30 @@ function policyDocument(region: string, accountId: string): string {
       {
         Effect: "Allow",
         Action: "iot:Publish",
-        Resource: `arn:aws:iot:${region}:${accountId}:topic/solgrid/*/telemetry`,
+        Resource: [
+          `arn:aws:iot:${region}:${accountId}:topic/solgrid/*/telemetry`,
+          `arn:aws:iot:${region}:${accountId}:topic/$aws/things/\${iot:Connection.Thing.ThingName}/jobs/start-next`,
+          `arn:aws:iot:${region}:${accountId}:topic/$aws/things/\${iot:Connection.Thing.ThingName}/jobs/*/update`,
+        ],
       },
       {
         Effect: "Allow",
-        Action: ["iot:Subscribe", "iot:Receive"],
+        Action: "iot:Subscribe",
         Resource: [
           `arn:aws:iot:${region}:${accountId}:topicfilter/solgrid/\${iot:Connection.Thing.ThingName}/command`,
+          `arn:aws:iot:${region}:${accountId}:topicfilter/$aws/things/\${iot:Connection.Thing.ThingName}/jobs/notify-next`,
+          `arn:aws:iot:${region}:${accountId}:topicfilter/$aws/things/\${iot:Connection.Thing.ThingName}/jobs/start-next/accepted`,
+          `arn:aws:iot:${region}:${accountId}:topicfilter/$aws/things/\${iot:Connection.Thing.ThingName}/jobs/start-next/rejected`,
+        ],
+      },
+      {
+        Effect: "Allow",
+        Action: "iot:Receive",
+        Resource: [
           `arn:aws:iot:${region}:${accountId}:topic/solgrid/\${iot:Connection.Thing.ThingName}/command`,
+          `arn:aws:iot:${region}:${accountId}:topic/$aws/things/\${iot:Connection.Thing.ThingName}/jobs/notify-next`,
+          `arn:aws:iot:${region}:${accountId}:topic/$aws/things/\${iot:Connection.Thing.ThingName}/jobs/start-next/accepted`,
+          `arn:aws:iot:${region}:${accountId}:topic/$aws/things/\${iot:Connection.Thing.ThingName}/jobs/start-next/rejected`,
         ],
       },
     ],

@@ -11,6 +11,23 @@ body {
   color: oklch(50% 0.015 250);
 }
 
+/* Keep DevConsole typography in sync with the user dashboard. Native form
+   controls do not inherit fonts by default, which previously made buttons and
+   selects fall back to the browser UI font. Technical values can still opt in
+   to IBM Plex Mono through their inline styles. */
+.dev-console {
+  line-height: 1.5;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+.dev-console button,
+.dev-console input,
+.dev-console select,
+.dev-console textarea {
+  font-family: inherit;
+}
+
 .dev-console input:focus,
 .dev-console select:focus,
 .dev-console textarea:focus {

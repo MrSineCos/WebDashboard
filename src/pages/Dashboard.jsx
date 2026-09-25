@@ -16,6 +16,7 @@ import { useUserSettings } from '../lib/userSettings.js';
 import { usePush } from '../lib/push.js';
 import { useLoads } from '../lib/loads.js';
 import { useAuth } from '../lib/AuthContext.jsx';
+import { LocalConnectionBanner, useLocalConnection } from '../lib/LocalConnectionContext.jsx';
 import { supabase } from '../lib/supabaseClient.js';
 
 const BLUE = 'oklch(54% 0.15 240)';
@@ -369,6 +370,7 @@ export default function Dashboard() {
   // xuống nằm trên danh sách (xem `order` bên dưới) thay vì ép chung một hàng.
   const alertsSideBySide = !useIsMobile(1200);
   const { station, statusMeta, stationColor, stationOptions, stationMenuOpen, toggleStationMenu, closeStationMenu, stations, createStation, updateStation, deleteStation, loading: stationLoading } = useStationSelector();
+  const local = useLocalConnection();
   // Chỉ còn dùng bản tin mới nhất cho các ô thông số — chuỗi thời gian của
   // biểu đồ nay do useTelemetryWindow bên dưới cung cấp.
   const { latest } = useTelemetry(station?.id);
@@ -755,7 +757,8 @@ export default function Dashboard() {
     setThresholdSuccess('Đã lưu ngưỡng cảnh báo cho trạm này.');
   }
 
-  if (stationLoading || !station || settings.loading || !profile) {
+  const localForStation = local.connected && local.localStationId === station?.id;
+  if (stationLoading || !station || settings.loading || (!profile && !localForStation)) {
     return (
       <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'oklch(97% 0.005 240)', color: 'oklch(52% 0.02 240)', fontFamily: "'Manrope',sans-serif" }}>
         Đang tải…
@@ -1166,6 +1169,7 @@ export default function Dashboard() {
       onMarkAllNotifsRead={markAllAlertsRead}
       onViewAllNotifs={() => navigateTo('alerts')}
     >
+      <LocalConnectionBanner stationId={station.id} />
       {!isMobile && (
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '28px', flexWrap: 'wrap', gap: '16px' }}>
           <div>

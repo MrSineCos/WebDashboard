@@ -43,8 +43,7 @@ BOTO_CONFIG = Config(connect_timeout=10, read_timeout=15, retries={"max_attempts
 
 
 def policy_document(region, account_id):
-    # Khớp docs/IOT.md mục 4.1 — publish telemetry của chính mình, và
-    # subscribe/receive lệnh điều khiển tải trên đúng topic của mình.
+    # Khớp docs/IOT.md mục 4.1 — các topic Jobs chỉ thuộc Thing của chứng chỉ.
     return json.dumps({
         "Version": "2012-10-17",
         "Statement": [
@@ -56,14 +55,30 @@ def policy_document(region, account_id):
             {
                 "Effect": "Allow",
                 "Action": "iot:Publish",
-                "Resource": f"arn:aws:iot:{region}:{account_id}:topic/solgrid/*/telemetry",
+                "Resource": [
+                    f"arn:aws:iot:{region}:{account_id}:topic/solgrid/*/telemetry",
+                    f"arn:aws:iot:{region}:{account_id}:topic/$aws/things/${{iot:Connection.Thing.ThingName}}/jobs/start-next",
+                    f"arn:aws:iot:{region}:{account_id}:topic/$aws/things/${{iot:Connection.Thing.ThingName}}/jobs/*/update",
+                ],
             },
             {
                 "Effect": "Allow",
-                "Action": ["iot:Subscribe", "iot:Receive"],
+                "Action": "iot:Subscribe",
                 "Resource": [
                     f"arn:aws:iot:{region}:{account_id}:topicfilter/solgrid/${{iot:Connection.Thing.ThingName}}/command",
+                    f"arn:aws:iot:{region}:{account_id}:topicfilter/$aws/things/${{iot:Connection.Thing.ThingName}}/jobs/notify-next",
+                    f"arn:aws:iot:{region}:{account_id}:topicfilter/$aws/things/${{iot:Connection.Thing.ThingName}}/jobs/start-next/accepted",
+                    f"arn:aws:iot:{region}:{account_id}:topicfilter/$aws/things/${{iot:Connection.Thing.ThingName}}/jobs/start-next/rejected",
+                ],
+            },
+            {
+                "Effect": "Allow",
+                "Action": "iot:Receive",
+                "Resource": [
                     f"arn:aws:iot:{region}:{account_id}:topic/solgrid/${{iot:Connection.Thing.ThingName}}/command",
+                    f"arn:aws:iot:{region}:{account_id}:topic/$aws/things/${{iot:Connection.Thing.ThingName}}/jobs/notify-next",
+                    f"arn:aws:iot:{region}:{account_id}:topic/$aws/things/${{iot:Connection.Thing.ThingName}}/jobs/start-next/accepted",
+                    f"arn:aws:iot:{region}:{account_id}:topic/$aws/things/${{iot:Connection.Thing.ThingName}}/jobs/start-next/rejected",
                 ],
             },
         ],
@@ -150,13 +165,16 @@ def write_config(out_dir, endpoint, thing_name, station_slug):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--thing-name", required=True, help="Tên thing = client id = devices.aws_thing_name")
+    parser.add_argument("--thing-name", help="Tên thing = client id = devices.aws_thing_name (bắt buộc khi tạo cert)")
     parser.add_argument("--station-slug", default="tram01", help="Dùng dựng topic solgrid/<slug>/telemetry")
     parser.add_argument("--policy-name", default=DEFAULT_POLICY_NAME)
     parser.add_argument("--region", default=None, help="Mặc định lấy từ AWS config/profile hiện tại")
     parser.add_argument("--out-dir", default="./certs", help="Nơi lưu cert/key/CA")
     parser.add_argument("--write-config", action="store_true", help="Sinh config.py từ config.example.py nếu chưa có")
+    parser.add_argument("--sync-policy-only", action="store_true", help="Chỉ cập nhật policy hiện có; không tạo thing hoặc cert mới")
     args = parser.parse_args()
+    if not args.sync_policy_only and not args.thing_name:
+        parser.error("--thing-name is required unless --sync-policy-only is used")
     print("Bắt đầu provisioning...", flush=True)
 
     session = boto3.Session(region_name=args.region)
@@ -178,6 +196,11 @@ def main():
             "(tránh boto3 chờ dò EC2 instance metadata không tồn tại)."
         )
     print(f"Account ID: {account_id}", flush=True)
+
+    if args.sync_policy_only:
+        ensure_policy(iot, args.policy_name, policy_document(region, account_id))
+        print(f"Đã đồng bộ policy '{args.policy_name}' — không tạo chứng chỉ mới.")
+        return
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

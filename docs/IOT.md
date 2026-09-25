@@ -94,19 +94,50 @@ Tạo IoT policy `solgrid-device-policy` cho phép connect + publish topic riên
     { "Effect": "Allow", "Action": "iot:Connect",
       "Resource": "arn:aws:iot:<region>:<account>:client/${iot:Connection.Thing.ThingName}" },
     { "Effect": "Allow", "Action": "iot:Publish",
-      "Resource": "arn:aws:iot:<region>:<account>:topic/solgrid/*/telemetry" },
-    { "Effect": "Allow", "Action": ["iot:Subscribe", "iot:Receive"],
+      "Resource": [
+        "arn:aws:iot:<region>:<account>:topic/solgrid/*/telemetry",
+        "arn:aws:iot:<region>:<account>:topic/$aws/things/${iot:Connection.Thing.ThingName}/jobs/start-next",
+        "arn:aws:iot:<region>:<account>:topic/$aws/things/${iot:Connection.Thing.ThingName}/jobs/*/update"
+      ] },
+    { "Effect": "Allow", "Action": "iot:Subscribe",
       "Resource": [
         "arn:aws:iot:<region>:<account>:topicfilter/solgrid/${iot:Connection.Thing.ThingName}/command",
-        "arn:aws:iot:<region>:<account>:topic/solgrid/${iot:Connection.Thing.ThingName}/command"
+        "arn:aws:iot:<region>:<account>:topicfilter/$aws/things/${iot:Connection.Thing.ThingName}/jobs/notify-next",
+        "arn:aws:iot:<region>:<account>:topicfilter/$aws/things/${iot:Connection.Thing.ThingName}/jobs/start-next/accepted",
+        "arn:aws:iot:<region>:<account>:topicfilter/$aws/things/${iot:Connection.Thing.ThingName}/jobs/start-next/rejected"
+      ]
+    },
+    { "Effect": "Allow", "Action": "iot:Receive",
+      "Resource": [
+        "arn:aws:iot:<region>:<account>:topic/solgrid/${iot:Connection.Thing.ThingName}/command",
+        "arn:aws:iot:<region>:<account>:topic/$aws/things/${iot:Connection.Thing.ThingName}/jobs/notify-next",
+        "arn:aws:iot:<region>:<account>:topic/$aws/things/${iot:Connection.Thing.ThingName}/jobs/start-next/accepted",
+        "arn:aws:iot:<region>:<account>:topic/$aws/things/${iot:Connection.Thing.ThingName}/jobs/start-next/rejected"
       ]
     }
   ]
 }
 ```
 
-Hai dòng cuối cho phép mỗi thiết bị subscribe **đúng topic lệnh của chính
-nó** (`solgrid/<thing-name>/command`) — cần cho mục 6 "Điều khiển tải".
+Các quyền Jobs khớp với `esp32s3.ino`: subscribe `notify-next` và phản hồi
+`start-next`; publish `start-next` và cập nhật trạng thái từng Job. Chỉ cấp
+quyền trên Thing của chính chứng chỉ. `iot:Subscribe` dùng ARN `topicfilter/`,
+còn `iot:Publish` và `iot:Receive` dùng ARN `topic/`. Policy này gồm cả hai
+kênh vì firmware hỗ trợ AWS IoT Jobs, trong khi Dashboard hiện đẩy OTA qua
+topic lệnh trực tiếp `solgrid/<thing>/command` (mục 10.5).
+
+Nếu chứng chỉ đã được cấp từ policy cũ, cập nhật **default version** của policy
+đang gắn với chứng chỉ (AWS IoT Core → Security → Certificates → Policies):
+
+```bash
+python tools/mqtt-simulator/provision_device.py --sync-policy-only --region <region> --policy-name solgrid-device-policy
+```
+
+Lệnh này không tạo Thing hoặc chứng chỉ mới. Cần có AWS credentials với quyền
+đọc/tạo policy version và chạy từ thư mục gốc repo sau khi cài
+`tools/mqtt-simulator/requirements.txt`. Có thể sửa policy trực tiếp trong AWS
+Console. Deploy `provision-device` riêng không cập nhật policy đang chạy; thiết
+bị hiện tại chỉ hết reconnect sau khi default version trên AWS đã được đổi.
 
 ### 4.2 Provisioning mỗi thiết bị
 
@@ -500,18 +531,47 @@ SSID/mật khẩu uplink là thiết bị mất mạng vĩnh viễn, không sử
 - Firmware cũ chưa có SoftAP thì `devices.ap_ssid` = null → DevConsole hiển
   thị "Thiết bị chưa báo cấu hình AP".
 
-### 9.2 Còn thiếu
+### 9.2 Dashboard cục bộ (đã triển khai)
 
-Trang web cục bộ chạy trên ESP32 **chưa làm**. Dashboard React này không dùng
-lại được: nó ~650 KB và mọi truy vấn đều đi Supabase, nên khi mất internet sẽ
-trắng màn hình. Cần một trang riêng, nhỏ, nhúng trong LittleFS, đọc thẳng state
-firmware qua HTTP server chạy trên chính ESP32.
+Firmware nhúng một dashboard độc lập ngay trong flash và phục vụ bằng HTTP tại
+`http://192.168.4.1`. Trang này không tải CDN, không gọi Supabase và không cần
+đăng nhập cloud; JavaScript đọc `GET /api/telemetry` mỗi giây nên số liệu đi
+thẳng từ ESP32 đến điện thoại/máy tính đang nối AP.
+
+Quy trình sử dụng khi mất internet:
+
+1. Kết nối WiFi có tên `AP_SSID` bằng `AP_PASSWORD` trong `secrets.h`.
+2. Chạm thông báo đăng nhập mạng nếu hệ điều hành hiện captive portal, hoặc mở
+   rõ `http://192.168.4.1` (phải là `http`, không phải `https`).
+3. Dashboard local hiển thị PV, pin, tải, nhiệt độ, trạng thái bảo vệ, liên kết
+   STM32 và trạng thái đồng bộ cloud; dữ liệu tự cập nhật mỗi giây.
+
+API trả JSON, CORS và Private Network Access header tại
+`http://192.168.4.1/api/telemetry`. Bản Windows/Electron tự dò endpoint này:
+khi kết nối được, `LocalConnectionProvider` ánh xạ `device` (AWS thing name)
+sang trạm tương ứng rồi đưa dữ liệu local vào chính `useStations`,
+`useTelemetry` và `useDevices`. Vì vậy User Dashboard và DevConsole hiện tại
+tự cập nhật trực tiếp, đồng thời có dải **Kết nối cục bộ** để người vận hành
+biết dữ liệu không đi qua cloud. Rời AP hoặc mất hai request liên tiếp thì app
+tự quay về nguồn Supabase/realtime.
+
+Mặc định app dò `http://192.168.4.1`; có thể đổi lúc build bằng
+`VITE_LOCAL_DEVICE_URL`. Bản web chạy trên HTTPS có thể bị trình duyệt chặn
+HTTP mixed-content/private-network, vì vậy tích hợp tự động này nhắm tới app
+Windows (origin HTTP loopback). Trang do ESP32 tự phục vụ vẫn là đường dự phòng
+luôn hoạt động trên điện thoại hoặc trình duyệt.
+
+Kết nối STA và AWS đã đổi sang cơ chế retry **không chặn**. Đây là phần bắt
+buộc: nếu còn vòng `while` chờ WiFi/MQTT trong `setup()` hoặc `loop()`, AP vẫn
+phát tên mạng nhưng HTTP server không có cơ hội xử lý request khi internet mất.
+Khi uplink trở lại, firmware tự nối AWS và tiếp tục publish telemetry như cũ.
 
 ## 10. Cập nhật firmware qua mạng (OTA)
 
 Luồng đã chạy được đầu-cuối: migration `0015_firmware_ota.sql` dựng **tầng lưu
 trữ** (catalog bản phát hành, bucket chứa `.bin`, cột theo dõi phiên bản trên
-`devices`), `send-ota-command` lo **chiều đẩy lệnh**, firmware lo **tải + kiểm
+`devices`, bổ sung phần trăm ở migration `0033_ota_progress.sql`),
+`send-ota-command` lo **chiều đẩy lệnh**, firmware lo **tải + kiểm
 hash + nạp**, `ingest-telemetry` lo **chiều thiết bị báo về**, và DevConsole lo
 **giao diện** (tải lên, chọn bản, đẩy, theo dõi) — xem 10.8.
 
@@ -524,7 +584,7 @@ Dev build .bin ──upload──▶ Storage bucket `firmware` (private)
                                     ▼
                          solgrid/<thing>/command {type:"ota",url,sha256}
                                     │
-                                    ▼  firmware: HTTPUpdate + kiểm hash
+                                    ▼  firmware: HTTPClient + Update + kiểm hash
                          ESP32 tải, verify SHA-256, ghi slot OTA, reboot
                                     │
                   telemetry kế: fw_version/fw_status ──▶ ingest-telemetry
@@ -571,7 +631,9 @@ không lệch nhau.
 
 Bucket là **private** — đặt public thì ai đoán ra URL cũng tải về dịch ngược
 được. Thiết bị lấy file qua **signed URL ngắn hạn** do Edge Function cấp bằng
-service role (service role bỏ qua RLS).
+user client đã xác thực (RLS giới hạn đúng release của chủ sở hữu). Service
+role chỉ được dùng phía server để cập nhật trạng thái `devices` sau khi lệnh
+đã publish.
 
 ```js
 // sha256 của đúng file .bin — firmware kiểm lại hash này trước khi commit ảnh,
@@ -616,6 +678,14 @@ Tính hash bằng CLI để đối chiếu: `sha256sum firmware.bin`.
 File `.bin` **không đi qua MQTT**: payload AWS IoT giới hạn 128 KB còn ảnh
 firmware cỡ vài MB. Lệnh MQTT chỉ mang **signed URL ngắn hạn**, thiết bị tự
 tải qua HTTPS — cũng là lý do bucket giữ được chế độ private.
+
+Trong triển khai hiện tại, `send-ota-command` publish trực tiếp payload
+`{type:"ota",...}` lên `solgrid/<aws_thing_name>/command`. Đây là đường được
+Dashboard sử dụng khi bấm **Cập nhật** hoặc **Đẩy OTA đến tất cả thiết bị**.
+Firmware cũng lắng nghe AWS IoT Jobs (`notify-next`/`start-next`) và có thể xử
+lý job document cùng loại, nhưng Edge Function này **không tạo AWS Job**; vì
+vậy lệnh direct MQTT không có `jobId` và trạng thái/tiến trình của nó được xác
+nhận qua telemetry `fw_*`.
 
 ```bash
 # Dùng chung cặp khoá iot:Publish + AWS_IOT_ENDPOINT với send-load-command
@@ -685,10 +755,11 @@ riêng, không cần deploy gì thêm — `ingest-telemetry` đã xử lý sẵn
 ```json
 {"client_id":"solgrid-esp32-01","solar_kw":2.1,
  "fw_version":"v2.3.1",                    // gửi sau mỗi lần (re)connect
- "fw_status":"downloading","fw_status_detail":"42%"}   // chỉ khi đang nạp
+ "fw_status":"downloading","fw_status_detail":"v2.3.1",
+ "fw_progress":42}                          // số nguyên 0..100 khi đang nạp
 ```
 
-Cả ba trường đều **tuỳ chọn** và ghi vào `devices` chứ không vào `telemetry` —
+Cả bốn trường đều **tuỳ chọn** và ghi vào `devices` chứ không vào `telemetry` —
 giá trị gần như không đổi, nhân bản vào mọi hàng time-series là lãng phí (cùng
 lý do với `ap_ssid`, mục 9). Đây là đường ghi **duy nhất** cho các cột này:
 `devices` không có policy update cho client, nên người dùng không thể tự khai
@@ -708,6 +779,10 @@ Quy tắc xử lý:
 - **`fw_status_detail`** luôn được ghi đè (hoặc xoá về null) cùng với
   `fw_status`, cắt còn 200 ký tự. Nếu không, lý do của lần hỏng cũ sẽ nằm lại
   bên cạnh một trạng thái `downloading` mới và gây hiểu nhầm.
+- **`fw_progress`** là số nguyên `0..100`, lưu ở snapshot `devices` thay vì bảng
+  time-series. `send-ota-command` đặt `0` cho lần đẩy mới; firmware báo theo số
+  byte đã tải/ghi; `applying` và `success` được chuẩn hoá thành `100`. Giá trị
+  ngoài miền bị bỏ qua nhưng phần telemetry hợp lệ còn lại vẫn được ghi nhận.
 - **Suy ra `success`**: firmware tối giản có thể chỉ báo `fw_version` mà không
   bao giờ báo `fw_status`. Nếu phiên bản vừa nhận **đúng bằng** phiên bản của
   bản đã đẩy (`fw_target_id`) trong khi trạng thái vẫn dang dở, function tự
@@ -723,21 +798,29 @@ Quy tắc xử lý:
 
 ### 10.7 Firmware
 
-Đã làm trong `firmware/esp32s3-solgrid/esp32s3-solgrid.ino`. Ba việc cần làm
+Đã làm trong `firmware/esp32s3.ino`. Ba việc cần làm
 trước khi nạp:
 
 1. **Partition Scheme** (Tools → Partition Scheme) phải có **hai** phân vùng
    app. Sơ đồ **mặc định đã đạt** (`app0`/`app1`, mỗi cái 1.25 MB) — chỉ cần
    tránh "Huge APP (3MB No OTA)" vốn chỉ có một app partition, khi đó
    `Update.begin()` luôn thất bại và thiết bị báo `detail=no_space`.
-2. **`SUPABASE_ROOT_CA`** trong `secrets.h` (xem `secrets.example.h` để biết
-   cách lấy). Thiết bị tải `.bin` từ **Supabase Storage** chứ không phải AWS
-   nên cần root CA khác — **không dùng lại `AmazonRootCA1.pem`** của MQTT.
-   Thiếu nó firmware vẫn chạy đủ mọi thứ khác, chỉ OTA bị vô hiệu và mọi lệnh
-   đẩy trả về `fw_status=failed, detail=ota_not_configured`.
-3. **Tăng `FW_VERSION`** trong `.ino` mỗi lần build một bản mới, và chuỗi đó
+2. URL tải thuộc **Supabase Storage**, không thuộc AWS IoT, nên **không dùng
+   `AWS_ROOT_CA`/`AmazonRootCA1.pem`** cho HTTP OTA. Có thể khai báo
+   `OTA_DOWNLOAD_ROOT_CA` trong `secrets.h` để ghim CA của endpoint Storage.
+   Nếu không khai báo, transport TLS không ghim CA nhưng firmware vẫn bắt buộc
+   kiểm SHA-256 của toàn bộ ảnh với hash nhận qua AWS IoT mutual-TLS trước khi
+   kích hoạt. Chế độ này tránh hỏng OTA khi signed URL redirect qua hostname có
+   chuỗi CA khác.
+3. **Tăng `FW_VERSION`** trong `secrets.h` mỗi lần build một bản mới, và chuỗi đó
    phải **trùng** `version` của hàng `firmware_releases` khi tải lên (mục 10.3).
    Cloud so hai chuỗi để biết thiết bị đã nạp xong chưa.
+
+Nếu thiết bị đang chạy bản firmware cũ chưa có luồng HTTPS OTA hiện tại (ví dụ
+bản còn dùng nhầm `AWS_ROOT_CA` cho URL Supabase), phải nạp bản sửa qua USB một
+lần. Không thể dùng chính downloader lỗi để tự tải bản vá. Sau khi thiết bị đã
+chạy bản sửa, hãy build một version mới khác (release đã tạo là bất biến) rồi
+kiểm tra cập nhật OTA từ bản đang chạy sang version mới đó.
 
 Luồng khi nhận lệnh `{type:"ota"}`:
 
@@ -750,6 +833,7 @@ loop()  ── runOtaUpdate()
              ├─ GET signed URL qua HTTPS (theo redirect)
              ├─ đối chiếu Content-Length với `size` trong lệnh
              ├─ Update.begin() → vừa ghi flash vừa băm SHA-256
+             │                    └─ báo fw_progress 0..100 (có giới hạn tần suất)
              ├─ hash khớp?  không → Update.abort()  → failed / sha_mismatch
              └─ Update.end(true) → 'applying' → ESP.restart()
                      │
@@ -787,9 +871,10 @@ nhưng hỏng logic (ví dụ sai SSID) sẽ ở lại cho tới khi nạp tay q
 chặn luôn hoạt động là kiểm SHA-256 trước khi kích hoạt phân vùng — ảnh tải
 lỗi thì không bao giờ được boot.
 
-**Dung lượng.** Bản build hiện tại chiếm **78%** phân vùng app 1.25 MB
-(1,025 KB / 1,311 KB); riêng phần OTA tốn ~38 KB. Còn ~285 KB dư — đủ nhưng
-không nhiều, cần để ý khi thêm tính năng (nhất là trang web cục bộ ở mục 9.2).
+**Dung lượng.** Bản build kiểm chứng hiện tại chiếm khoảng **84%** phân vùng
+app 1.25 MB (1,105 KB / 1,311 KB), còn khoảng 200 KB dư. Đây là tổng của
+firmware, OTA và dashboard cục bộ; cần kiểm tra lại kích thước sau khi thêm
+tính năng (nhất là trang web cục bộ ở mục 9.2).
 
 ### 10.8 Giao diện — DevConsole → Quản lý Firmware MCU
 
@@ -797,9 +882,10 @@ Ba khối, đúng ba đường dữ liệu khác nhau (`src/lib/firmware.js` +
 `src/pages/DevConsole.jsx`):
 
 1. **Thiết bị** — đọc thẳng `devices` (RLS select-own). Hiện `fw_version` thiết
-   bị tự báo, huy hiệu `fw_status`, và `fw_status_detail` đã dịch sang tiếng
-   Việt (`sha_mismatch` → "hash không khớp, file tải về hỏng"; `http_403` →
-   "link tải đã hết hạn"). Khi `fw_target_id` trỏ tới bản khác với `fw_version`,
+   bị tự báo, huy hiệu `fw_status`, `fw_progress` và `fw_status_detail` đã dịch
+   sang tiếng Việt (`sha_mismatch` → "hash không khớp, file tải về hỏng";
+   `http_403` → "link tải đã hết hạn"; `https_connection_failed`/`http_-1` →
+   "không kết nối được HTTPS tới Storage"). Khi `fw_target_id` trỏ tới bản khác với `fw_version`,
    hàng thiết bị hiện thêm dòng "Đã đẩy vX — thiết bị chưa xác nhận": đó chính
    là tín hiệu nạp hỏng ở mục 10.6, cố tình không rút gọn thành "đã cập nhật".
    `<select>` chọn bản + nút "Đẩy OTA đến tất cả thiết bị" (`station_id`) và
@@ -813,8 +899,10 @@ Ba khối, đúng ba đường dữ liệu khác nhau (`src/lib/firmware.js` +
    `contentType: 'application/octet-stream'` và insert `firmware_releases`.
    Hai bước không nguyên tử: nếu insert lỗi (trùng board+version...), object
    vừa tải lên được xoá lại ngay để không thành mồ côi (mục 10.4). Ô **Board**
-   mặc định `esp32s3-solgrid`; **Phiên bản** tự gợi ý từ tên file nhưng vẫn
-   phải soát — cả hai chuỗi phải trùng `FW_BOARD`/`FW_VERSION` trong `.ino`.
+   mặc định là `esp32s3-solgrid` nhưng có thể đổi theo loại firmware. Board là
+   mã loại firmware, không phải tên hiển thị của thiết bị (ví dụ `YoloUno`).
+   **Phiên bản** tự gợi ý từ tên file nhưng vẫn phải soát — hai chuỗi phải
+   trùng `FW_BOARD`/`FW_VERSION` trong `secrets.h` của bản build.
 
 3. **Bản phát hành** — catalog thật. Bấm một hàng để chọn bản sẽ đẩy;
    **rollback = chọn một bản cũ hơn rồi bấm "Cập nhật"**, không có nút riêng vì

@@ -5,13 +5,16 @@ import './index.css'
 import App from './App.jsx'
 import ErrorBoundary from './components/ErrorBoundary.jsx'
 import { AuthProvider } from './lib/AuthContext.jsx'
+import { LocalConnectionProvider } from './lib/LocalConnectionContext.jsx'
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>
     <ErrorBoundary>
       <BrowserRouter>
         <AuthProvider>
-          <App />
+          <LocalConnectionProvider>
+            <App />
+          </LocalConnectionProvider>
         </AuthProvider>
       </BrowserRouter>
     </ErrorBoundary>

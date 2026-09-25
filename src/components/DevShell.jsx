@@ -134,7 +134,7 @@ function navItemStyle(active) {
     padding: '9px 12px',
     borderRadius: '8px',
     cursor: 'pointer',
-    fontSize: '13px',
+    fontSize: '13.5px',
     fontWeight: active ? 700 : 500,
     color: active ? 'oklch(78% 0.14 200)' : 'oklch(62% 0.015 250)',
     background: active ? 'oklch(24% 0.04 200)' : 'transparent',
@@ -211,7 +211,7 @@ export default function DevShell({
         <div style={{ position: 'fixed', left: 0, top: 0, width: '240px', height: '100vh', background: 'oklch(11% 0.018 250)', boxSizing: 'border-box', padding: '24px 14px', display: 'flex', flexDirection: 'column', gap: '6px', zIndex: 10, borderRight: '1px solid oklch(26% 0.02 250)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 8px 6px' }}>
             <Logo />
-            <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '16px', fontWeight: 700, color: 'white' }}>SolGrid</span>
+            <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '18px', fontWeight: 700, color: 'white' }}>SolGrid</span>
           </div>
           <div style={{ display: 'inline-flex', alignSelf: 'flex-start', margin: '0 8px 14px', fontFamily: "'IBM Plex Mono',monospace", fontSize: '10.5px', fontWeight: 600, letterSpacing: '0.06em', color: 'oklch(75% 0.14 70)', background: 'oklch(28% 0.05 70)', padding: '3px 8px', borderRadius: '5px' }}>DEV CONSOLE</div>
 

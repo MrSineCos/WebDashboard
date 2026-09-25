@@ -67,7 +67,6 @@ const CORS_HEADERS = {
 // để URL rò ra ngoài không dùng được mãi. Hết hạn trước khi tải xong → thiết bị
 // báo fw_status='failed', đẩy lại là có URL mới.
 const SIGNED_URL_TTL = Number(Deno.env.get("OTA_SIGNED_URL_TTL") ?? 3600);
-
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -112,7 +111,6 @@ Deno.serve(async (req) => {
     .maybeSingle();
   if (relErr) return json({ error: "lookup_failed", detail: relErr.message }, 500);
   if (!release) return json({ error: "release_not_found" }, 404);
-
   // Chỉ ESP32 mới nạp được firmware này (inverter/bms/sensor là thiết bị của
   // hãng khác, không nói giao thức OTA của ta).
   let deviceQuery = userClient
@@ -191,6 +189,9 @@ Deno.serve(async (req) => {
       fw_target_id: release.id,
       fw_status: "pending",
       fw_status_detail: null,
+      // Một lần đẩy mới phải bắt đầu lại từ 0; nếu giữ phần trăm của lần trước,
+      // dashboard sẽ tạm hiện 100% trong lúc thiết bị còn chưa nhận lệnh mới.
+      fw_progress: 0,
       fw_status_at: new Date().toISOString(),
     })
     .in("id", okIds);

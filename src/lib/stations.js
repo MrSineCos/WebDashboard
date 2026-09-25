@@ -1,6 +1,7 @@
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useMemo, useState } from 'react';
 import { supabase } from './supabaseClient.js';
 import { useAuth } from './AuthContext.jsx';
+import { useLocalConnection } from './LocalConnectionContext.jsx';
 
 // Bảng màu trạng thái trạm cho các trang nền sáng (AppShell: Dashboard, Pin
 // lưu trữ, Báo cáo) — kèm `bg`/`textColor` để vẽ huy hiệu trên nền trắng.
@@ -72,6 +73,23 @@ function mergeRealtimeRow(previous, raw) {
   return mapped;
 }
 
+function applyLocalSnapshot(station, snapshot) {
+  const protectionWarning = snapshot.protect_reason && snapshot.protect_reason !== 'ok';
+  return {
+    ...station,
+    status: protectionWarning || snapshot.stm32_link === false ? 'warning' : 'online',
+    solarKw: Number(snapshot.solar_kw),
+    batteryPct: Number(snapshot.battery_pct),
+    batteryVoltage: Number(snapshot.battery_voltage),
+    batteryCurrent: Number(snapshot.battery_current),
+    chargeEnabled: Boolean(snapshot.charge_enabled),
+    dischargeEnabled: Boolean(snapshot.discharge_enabled),
+    protectReason: snapshot.protect_reason || 'ok',
+    lastSeenAt: snapshot.receivedAt,
+    dataSource: 'local',
+  };
+}
+
 // Dung lượng pack mặc định (kWh) khi trạm chưa khai báo — khớp default của cột
 // `battery_capacity_kwh` (0020) và pack 100Ah/48V mô tả trên trang Pin lưu trữ.
 export const DEFAULT_PACK_CAPACITY_KWH = 4.8;
@@ -123,6 +141,8 @@ export function fmtPower(kw) {
 // own presentation (colors/styles) from `station.status`.
 export function useStations() {
   const { user } = useAuth();
+  const local = useLocalConnection();
+  const { rememberStations } = local;
   // Xem chú thích ở useTelemetry (lib/telemetry.js): effect bám vào user.id để
   // không tải lại mỗi lần object `user` đổi identity.
   const userId = user?.id ?? null;
@@ -202,6 +222,17 @@ export function useStations() {
     };
   }, [userId, channelSuffix]);
 
+  useEffect(() => {
+    rememberStations(stations);
+  }, [stations, rememberStations]);
+
+  // Khi app bắt được ESP32, chọn đúng trạm gắn với thing name. Nếu đây là lần
+  // mở app hoàn toàn ngoại tuyến và chưa có catalog cloud, localStationId là
+  // một id tổng hợp để RequireStation/Dashboard vẫn dựng được giao diện.
+  useEffect(() => {
+    if (local.connected && local.localStationId) setStationIdState(local.localStationId);
+  }, [local.connected, local.localStationId]);
+
   async function selectStation(id) {
     setStationIdState(id);
     if (!user) return;
@@ -252,9 +283,30 @@ export function useStations() {
     return {};
   }
 
-  const station = stations.find((s) => s.id === stationId) || stations[0] || null;
+  const displayStations = useMemo(() => {
+    if (!local.connected || !local.snapshot || !local.localStationId) return stations;
+    const index = stations.findIndex((station) => station.id === local.localStationId);
+    if (index >= 0) {
+      return stations.map((station, i) => (i === index ? applyLocalSnapshot(station, local.snapshot) : station));
+    }
+    return [
+      ...stations,
+      applyLocalSnapshot({
+        id: local.localStationId,
+        name: local.snapshot.station || local.snapshot.device,
+        location: 'Kết nối trực tiếp với ESP32',
+        timezone: 'Asia/Ho_Chi_Minh',
+        batteryCycles: null,
+        batteryCapacityKwh: null,
+        chargeEnergyKwh: null,
+        dischargeEnergyKwh: null,
+      }, local.snapshot),
+    ];
+  }, [stations, local.connected, local.snapshot, local.localStationId]);
 
-  return { stations, station, stationId, selectStation, createStation, updateStation, deleteStation, loading };
+  const station = displayStations.find((s) => s.id === stationId) || displayStations[0] || null;
+
+  return { stations: displayStations, station, stationId, selectStation, createStation, updateStation, deleteStation, loading: loading && !local.connected };
 }
 
 // Light-theme presentation wrapper for AppShell-based pages (Dashboard,

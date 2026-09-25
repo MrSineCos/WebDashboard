@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from './supabaseClient.js';
 import { useAuth } from './AuthContext.jsx';
+import { useLocalConnection } from './LocalConnectionContext.jsx';
 
 // Đẩy ngưỡng bảo vệ pin của trạm xuống các ESP32 của nó (Edge Function
 // send-battery-config publish qua AWS IoT). `mode` bỏ trống → dùng mode đang
@@ -33,6 +34,7 @@ async function pushBatteryConfig(stationId, mode) {
 //   via useDevices().)
 export function useUserSettings(stationId) {
   const { user } = useAuth();
+  const local = useLocalConnection();
   // Xem chú thích ở useTelemetry (lib/telemetry.js): effect bám vào user.id để
   // không tải lại mỗi lần object `user` đổi identity.
   const userId = user?.id ?? null;
@@ -112,7 +114,7 @@ export function useUserSettings(stationId) {
   const alertThresholds = stationSettings?.alert_thresholds ?? {};
 
   return {
-    loading: userLoading || stationLoading,
+    loading: (userLoading || stationLoading) && !(local.connected && local.localStationId === stationId),
     batteryModes: stationSettings?.battery_modes ?? null,
     activeBatteryMode: stationSettings?.active_battery_mode ?? 'balanced',
     moduleVisibility,
