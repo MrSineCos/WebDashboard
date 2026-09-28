@@ -9,13 +9,18 @@ import { useLocalConnection } from './LocalConnectionContext.jsx';
 // cấu hình đã lưu ở station_settings, thiết bị không nhận ngay vẫn giữ ngưỡng
 // cũ an toàn và sẽ đồng bộ ở lần đổi mode kế tiếp.
 async function pushBatteryConfig(stationId, mode) {
-  if (!stationId) return;
+  if (!stationId) return { ok: false, error: new Error('missing_station_id') };
   try {
     const body = mode ? { station_id: stationId, mode } : { station_id: stationId };
-    const { error } = await supabase.functions.invoke('send-battery-config', { body });
-    if (error) console.warn('send-battery-config failed:', error.message);
+    const { data, error } = await supabase.functions.invoke('send-battery-config', { body });
+    if (error) {
+      console.warn('send-battery-config failed:', error.message);
+      return { ok: false, error };
+    }
+    return { ok: true, data };
   } catch (e) {
     console.warn('send-battery-config error:', e);
+    return { ok: false, error: e };
   }
 }
 
@@ -93,8 +98,9 @@ export function useUserSettings(stationId) {
 
   async function stationPatch(fields) {
     setStationSettings((prev) => (prev ? { ...prev, ...fields } : prev));
-    if (!user || !stationId) return;
-    await supabase.from('station_settings').update(fields).eq('station_id', stationId).eq('owner_id', user.id);
+    if (!user || !stationId) return { error: new Error('missing_station_context') };
+    const { error } = await supabase.from('station_settings').update(fields).eq('station_id', stationId).eq('owner_id', user.id);
+    return { error };
   }
 
   const moduleVisibility = stationSettings?.module_visibility ?? {};
@@ -132,16 +138,20 @@ export function useUserSettings(stationId) {
       await patch({ energy_unit: unit });
     },
     async updateBatteryModes(nextBatteryModes) {
-      await stationPatch({ battery_modes: nextBatteryModes });
+      const save = await stationPatch({ battery_modes: nextBatteryModes });
+      if (save?.error) return { save, push: { ok: false, error: save.error } };
       // Ngưỡng của mode đang chọn có thể vừa đổi → đẩy lại xuống thiết bị.
-      await pushBatteryConfig(stationId);
+      const push = await pushBatteryConfig(stationId);
+      return { save, push };
     },
     async setActiveBatteryMode(mode) {
-      await stationPatch({ active_battery_mode: mode });
+      const save = await stationPatch({ active_battery_mode: mode });
+      if (save?.error) return { save, push: { ok: false, error: save.error } };
       // Đẩy ngưỡng của mode mới xuống các ESP32 của trạm để thực sự áp dụng
       // (không chỉ lưu DB). Không chặn UI nếu đẩy lỗi — cấu hình đã lưu, thiết
       // bị sẽ nhận ở lần đồng bộ sau; xem pushBatteryConfig().
-      await pushBatteryConfig(stationId, mode);
+      const push = await pushBatteryConfig(stationId, mode);
+      return { save, push };
     },
     async toggleModule(id) {
       await stationPatch({ module_visibility: { ...moduleVisibility, [id]: !moduleVisibility[id] } });
@@ -160,9 +170,18 @@ export function useUserSettings(stationId) {
     // trong 1 round-trip — nhận giá trị hiện tại làm tham số (không đọc lại
     // từ state) để tránh áp dụng nhầm dữ liệu chưa lưu/đã cũ.
     async applyBatteryModesToAll(nextBatteryModes) {
-      if (!user) return;
-      await supabase.from('station_settings').update({ battery_modes: nextBatteryModes }).eq('owner_id', user.id);
+      if (!user) return { save: { error: new Error('missing_user') }, pushes: [] };
+      const { error: saveError } = await supabase.from('station_settings').update({ battery_modes: nextBatteryModes }).eq('owner_id', user.id);
       setStationSettings((prev) => (prev ? { ...prev, battery_modes: nextBatteryModes } : prev));
+      if (saveError) return { save: { error: saveError }, pushes: [] };
+
+      const { data: stationRows, error: stationLookupError } = await supabase
+        .from('station_settings')
+        .select('station_id')
+        .eq('owner_id', user.id);
+      if (stationLookupError) return { save: { error: null }, lookupError: stationLookupError, pushes: [] };
+      const pushes = await Promise.all((stationRows || []).map((row) => pushBatteryConfig(row.station_id)));
+      return { save: { error: null }, pushes };
     },
     async applyModuleVisibilityToAll(nextModuleVisibility) {
       if (!user) return;

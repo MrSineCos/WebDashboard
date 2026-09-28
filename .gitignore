@@ -49,3 +49,5 @@ __pycache__/
 
 # Khoá VAPID sinh ra để nạp bằng `supabase secrets set --env-file` (chứa khoá RIÊNG)
 .vapid.env
+
+docs/report/*

@@ -95,16 +95,6 @@ const NAV_ITEMS = [
     ),
   },
   {
-    id: 'simulation',
-    label: 'Chế độ mô phỏng',
-    icon: (
-      <svg width="17" height="17" viewBox="0 0 20 20">
-        <path d="M8 2.5h4M8.5 2.5v4.8L4.8 14a1.8 1.8 0 001.6 2.7h7.2a1.8 1.8 0 001.6-2.7L11.5 7.3V2.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
-        <line x1="6.5" y1="12" x2="13.5" y2="12" stroke="currentColor" strokeWidth="1.3" />
-      </svg>
-    ),
-  },
-  {
     id: 'account',
     label: 'Tài khoản',
     icon: (

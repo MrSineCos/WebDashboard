@@ -57,10 +57,21 @@ const SENSORS = [
   { name: 'Cảm biến nhiệt độ pin', raw: '822 ADC', scale: '0.0512', offset: '-2.1', calibrated: '31°C' },
 ];
 
+// Pack thực nghiệm là 12 V (đo 12.6–13.6 V khi chạy), không phải pack 48 V mà
+// bản thiết kế ban đầu giả định. Dải thanh trượt "Điện áp sạc tối đa" bám theo
+// pack 12 V để không thể đặt một ngưỡng dừng sạc mà pin không bao giờ chạm tới.
+// Giữ khớp với PACK_MAX_VOLTAGE_* trong firmware/esp32s3.ino.
+const PACK_MAX_VOLTAGE_MIN = 12;
+const PACK_MAX_VOLTAGE_MAX = 15;
+// Dải "Dòng sạc tối đa" của pack 12 V. Giữ khớp với CHARGE_CURRENT_* trong
+// send-battery-config và migration 0035.
+const CHARGE_CURRENT_MIN = 3;
+const CHARGE_CURRENT_MAX = 8;
+
 const BATTERY_MODE_DEFAULTS = {
-  low: { desc: 'Sử dụng tối đa dung lượng pin, sạc nhanh và xả sâu hơn để khai thác tối đa năng lượng. Có thể làm giảm tuổi thọ pin theo thời gian.', minSoc: 10, maxSoc: 95, maxCurrent: 35, maxVoltage: 55.2, deepDischargeProtect: false },
-  balanced: { desc: 'Cân bằng giữa hiệu suất sử dụng và tuổi thọ pin, phù hợp cho vận hành hàng ngày.', minSoc: 20, maxSoc: 90, maxCurrent: 25, maxVoltage: 54.6, deepDischargeProtect: true },
-  max: { desc: 'Ưu tiên bảo vệ tuổi thọ pin ở mức cao nhất, vận hành trong dải an toàn hẹp hơn. Dung lượng khả dụng thấp hơn nhưng pin bền hơn lâu dài.', minSoc: 30, maxSoc: 80, maxCurrent: 15, maxVoltage: 53.8, deepDischargeProtect: true },
+  low: { desc: 'Sử dụng tối đa dung lượng pin, sạc nhanh và xả sâu hơn để khai thác tối đa năng lượng. Có thể làm giảm tuổi thọ pin theo thời gian.', minSoc: 10, maxSoc: 95, maxCurrent: 8, maxVoltage: 14.6, deepDischargeProtect: false },
+  balanced: { desc: 'Cân bằng giữa hiệu suất sử dụng và tuổi thọ pin, phù hợp cho vận hành hàng ngày.', minSoc: 20, maxSoc: 90, maxCurrent: 6, maxVoltage: 14.4, deepDischargeProtect: true },
+  max: { desc: 'Ưu tiên bảo vệ tuổi thọ pin ở mức cao nhất, vận hành trong dải an toàn hẹp hơn. Dung lượng khả dụng thấp hơn nhưng pin bền hơn lâu dài.', minSoc: 30, maxSoc: 80, maxCurrent: 4, maxVoltage: 14.2, deepDischargeProtect: true },
 };
 
 const MODE_LABELS = { low: 'Thấp', balanced: 'Cân bằng', max: 'Tối đa' };
@@ -75,6 +86,34 @@ const MODULE_DEFS = [
 ];
 
 const STATUS_COLOR = { online: 'oklch(70% 0.15 150)', offline: 'oklch(62% 0.19 25)' };
+
+const CONFIG_SYNC_TIMEOUT_MS = 60 * 1000;
+const CONFIG_SYNC_META = {
+  idle: { label: 'Chưa có lần đồng bộ', color: 'oklch(68% 0.015 250)', background: 'oklch(28% 0.02 250)' },
+  pending: { label: 'Đã gửi · chờ thiết bị xác nhận', color: 'oklch(78% 0.14 70)', background: 'oklch(30% 0.06 70)' },
+  received: { label: 'ESP32 đã nhận', color: 'oklch(78% 0.14 70)', background: 'oklch(30% 0.06 70)' },
+  applying: { label: 'STM32 đang áp dụng', color: 'oklch(78% 0.14 70)', background: 'oklch(30% 0.06 70)' },
+  applied: { label: 'Đã áp dụng trên STM32', color: 'oklch(70% 0.15 150)', background: 'oklch(28% 0.05 150)' },
+  already_applied: { label: 'Đã áp dụng trước đó', color: 'oklch(70% 0.15 150)', background: 'oklch(28% 0.05 150)' },
+  rejected: { label: 'STM32 từ chối', color: 'oklch(80% 0.14 25)', background: 'oklch(28% 0.06 25)' },
+  timeout: { label: 'Timeout · chưa có ACK', color: 'oklch(80% 0.14 25)', background: 'oklch(28% 0.06 25)' },
+  publish_failed: { label: 'Không gửi được tới AWS IoT', color: 'oklch(80% 0.14 25)', background: 'oklch(28% 0.06 25)' },
+  unknown: { label: 'Chưa có dữ liệu xác nhận', color: 'oklch(68% 0.015 250)', background: 'oklch(28% 0.02 250)' },
+};
+
+function configSyncView(device, now = Date.now()) {
+  const status = device?.config_sync_status || 'unknown';
+  const requestedAt = device?.config_sync_requested_at ? Date.parse(device.config_sync_requested_at) : NaN;
+  const waiting = ['pending', 'received', 'applying'].includes(status);
+  if (waiting && Number.isFinite(requestedAt) && now - requestedAt >= CONFIG_SYNC_TIMEOUT_MS) {
+    return { ...CONFIG_SYNC_META.timeout, status: 'timeout', sourceStatus: status };
+  }
+  return { ...(CONFIG_SYNC_META[status] || CONFIG_SYNC_META.unknown), status };
+}
+
+function configVersionLabel(value) {
+  return value == null ? '—' : String(value);
+}
 
 // Giây → "14n 6h 32p". Cắt hẳn phần giây: chu kỳ telemetry ~10s nên chữ số
 // giây chỉ nhấp nháy chứ không thêm thông tin gì. null = không đọc được.
@@ -693,13 +732,12 @@ export default function DevConsole() {
   // như mọi sự cố đều là 'error'.
   const [logSource, setLogSource] = useState('all');
   const [logSearch, setLogSearch] = useState('');
-  const [simMode, setSimMode] = useState(false);
-  const [simSolar, setSimSolar] = useState(2.4);
-  const [simBattery, setSimBattery] = useState(78);
-  const [simLoad, setSimLoad] = useState(0.23);
   const [editingMode, setEditingMode] = useState('balanced');
   const [batteryModesSaved, setBatteryModesSaved] = useState(false);
   const [draftBatteryModes, setDraftBatteryModes] = useState(null);
+  const [batteryPushNotice, setBatteryPushNotice] = useState('');
+  const [batteryPushError, setBatteryPushError] = useState('');
+  const [configStatusNow, setConfigStatusNow] = useState(Date.now());
   const [confirmApplyModules, setConfirmApplyModules] = useState(false);
   const [confirmApplyBattery, setConfirmApplyBattery] = useState(false);
   const [selectedDevice, setSelectedDevice] = useState(null);
@@ -776,6 +814,11 @@ export default function DevConsole() {
   const location = useLocation();
   const [signingOut, setSigningOut] = useState(false);
 
+  useEffect(() => {
+    const timer = setInterval(() => setConfigStatusNow(Date.now()), 5000);
+    return () => clearInterval(timer);
+  }, []);
+
   // Chỉ hiện màn "Đang tải…" (thay toàn bộ DevShell bằng placeholder ngắn)
   // ở lần tải đầu tiên. Nếu dùng thẳng settings.loading, mỗi lần đổi trạm
   // useUserSettings sẽ set loading=true trở lại, unmount toàn bộ trang dài
@@ -813,6 +856,8 @@ export default function DevConsole() {
     if (!currentStation) return;
     setDraftBatteryModes(settings.batteryModes ?? null);
     setBatteryModesSaved(false);
+    setBatteryPushNotice('');
+    setBatteryPushError('');
   }, [currentStation, settings.batteryModes]);
 
   const batteryModes = draftBatteryModes || settings.batteryModes || BATTERY_MODE_DEFAULTS;
@@ -870,8 +915,19 @@ export default function DevConsole() {
 
   async function saveBatteryModes() {
     if (settings.loading) return;
-    await settings.updateBatteryModes(draftBatteryModes);
-    setBatteryModesSaved(true);
+    setBatteryPushNotice('');
+    setBatteryPushError('');
+    const result = await settings.updateBatteryModes(draftBatteryModes);
+    if (result?.save?.error) {
+      setBatteryPushError(`Không lưu được cấu hình trên cloud; chưa gửi cấu hình tới thiết bị. (${result.save.error.message})`);
+    } else if (result?.push?.ok && !result.push.data?.status_write_failed) {
+      setBatteryPushNotice('Đã lưu cloud và gửi cấu hình; đang chờ ESP32/STM32 xác nhận.');
+    } else if (result?.push?.ok) {
+      setBatteryPushError('Đã gửi cấu hình nhưng chưa ghi được snapshot trạng thái; chưa thể theo dõi ACK trên DevConsole.');
+    } else {
+      setBatteryPushError('Đã lưu cấu hình trên cloud nhưng chưa gửi được tới thiết bị. Kiểm tra trạng thái bên dưới.');
+    }
+    setBatteryModesSaved(!result?.save?.error);
   }
 
   async function resetBatteryModes() {
@@ -879,7 +935,20 @@ export default function DevConsole() {
     const clone = JSON.parse(JSON.stringify(BATTERY_MODE_DEFAULTS));
     setDraftBatteryModes(clone);
     setBatteryModesSaved(false);
-    await settings.updateBatteryModes(clone);
+    const result = await settings.updateBatteryModes(clone);
+    if (result?.save?.error) {
+      setBatteryPushNotice('');
+      setBatteryPushError('Không lưu được cấu hình mặc định trên cloud; chưa gửi tới thiết bị.');
+    } else if (result?.push?.ok && !result.push.data?.status_write_failed) {
+      setBatteryPushNotice('Đã khôi phục mặc định và gửi cấu hình; đang chờ thiết bị xác nhận.');
+      setBatteryPushError('');
+    } else if (result?.push?.ok) {
+      setBatteryPushNotice('');
+      setBatteryPushError('Đã gửi cấu hình mặc định nhưng chưa ghi được snapshot trạng thái.');
+    } else {
+      setBatteryPushNotice('');
+      setBatteryPushError('Đã khôi phục trên cloud nhưng chưa gửi được tới thiết bị.');
+    }
   }
 
   async function handleApplyBatteryToAll() {
@@ -889,7 +958,29 @@ export default function DevConsole() {
       return;
     }
     setConfirmApplyBattery(false);
-    await settings.applyBatteryModesToAll(draftBatteryModes);
+    setBatteryPushNotice('');
+    setBatteryPushError('');
+    const result = await settings.applyBatteryModesToAll(draftBatteryModes);
+    if (result?.save?.error) {
+      setBatteryPushError('Không lưu được cấu hình cho tất cả trạm trên cloud.');
+      setBatteryModesSaved(false);
+      return;
+    }
+    if (result?.lookupError) {
+      setBatteryPushError('Đã lưu cho các trạm nhưng chưa lấy được danh sách để gửi cấu hình.');
+      setBatteryModesSaved(true);
+      return;
+    }
+    const pushes = result?.pushes || [];
+    const allPushed = pushes.length > 0 && pushes.every((push) => push?.ok && !push.data?.status_write_failed);
+    const somePushed = pushes.some((push) => push?.ok);
+    if (allPushed) {
+      setBatteryPushNotice('Đã lưu và gửi cấu hình tới tất cả trạm; đang chờ các ESP32/STM32 xác nhận.');
+    } else if (somePushed) {
+      setBatteryPushError('Đã lưu và gửi được một phần cấu hình; kiểm tra trạng thái từng ESP32 bên dưới.');
+    } else {
+      setBatteryPushError('Đã lưu cấu hình cho các trạm nhưng chưa gửi được tới thiết bị.');
+    }
     setBatteryModesSaved(true);
   }
 
@@ -1571,7 +1662,7 @@ export default function DevConsole() {
                 <label style={{ fontSize: '13px', fontWeight: 600 }}>Dòng sạc tối đa</label>
                 <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '13px', color: ACCENT }}>{editing.maxCurrent} A</span>
               </div>
-              <input type="range" min="5" max="50" step="1" value={editing.maxCurrent} onChange={(e) => updateEditing({ maxCurrent: +e.target.value })} style={{ width: '100%', accentColor: ACCENT }} />
+              <input type="range" min={CHARGE_CURRENT_MIN} max={CHARGE_CURRENT_MAX} step="1" value={editing.maxCurrent} onChange={(e) => updateEditing({ maxCurrent: +e.target.value })} style={{ width: '100%', accentColor: ACCENT }} />
             </div>
 
             <div style={{ marginBottom: '8px' }}>
@@ -1579,7 +1670,7 @@ export default function DevConsole() {
                 <label style={{ fontSize: '13px', fontWeight: 600 }}>Điện áp sạc tối đa</label>
                 <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '13px', color: ACCENT }}>{editing.maxVoltage.toFixed(1)} V</span>
               </div>
-              <input type="range" min="48" max="58" step="0.1" value={editing.maxVoltage} onChange={(e) => updateEditing({ maxVoltage: +e.target.value })} style={{ width: '100%', accentColor: ACCENT }} />
+              <input type="range" min={PACK_MAX_VOLTAGE_MIN} max={PACK_MAX_VOLTAGE_MAX} step="0.1" value={editing.maxVoltage} onChange={(e) => updateEditing({ maxVoltage: +e.target.value })} style={{ width: '100%', accentColor: ACCENT }} />
             </div>
 
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingTop: '16px', marginTop: '14px', borderTop: '1px solid oklch(26% 0.02 250)' }}>
@@ -1600,12 +1691,71 @@ export default function DevConsole() {
             )}
           </div>
           </div>
+
+          {batteryPushNotice && (
+            <div style={{ marginTop: '14px', fontSize: '13px', color: 'oklch(70% 0.15 150)' }}>{batteryPushNotice}</div>
+          )}
+          {batteryPushError && (
+            <div style={{ marginTop: '14px', fontSize: '13px', color: 'oklch(80% 0.14 25)' }}>{batteryPushError}</div>
+          )}
+
+          <div style={{ background: 'oklch(19% 0.022 250)', border: '1px solid oklch(30% 0.02 250)', borderRadius: '12px', padding: '20px', marginTop: '16px' }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap', marginBottom: '14px' }}>
+              <div>
+                <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '17px', fontWeight: 700, margin: '0 0 4px' }}>Trạng thái đồng bộ cấu hình BMS</h2>
+                <p style={{ fontSize: '12px', color: 'oklch(62% 0.015 250)', margin: 0 }}>Chỉ xem là thành công khi ESP32 báo ACK hợp lệ sau khi STM32 đã nhận và áp dụng cấu hình.</p>
+              </div>
+              <span style={{ fontSize: '11.5px', color: 'oklch(62% 0.015 250)' }}>Cập nhật realtime</span>
+            </div>
+
+            {esp32Devices.length === 0 ? (
+              <div style={{ padding: '14px 2px', fontSize: '12.5px', color: 'oklch(62% 0.015 250)' }}>Chưa có ESP32 nào trong trạm để nhận cấu hình.</div>
+            ) : esp32Devices.map((device) => {
+              const sync = configSyncView(device, configStatusNow);
+              const requestedAt = device.config_sync_requested_at ? new Date(device.config_sync_requested_at) : null;
+              const ackAt = device.config_sync_ack_at ? new Date(device.config_sync_ack_at) : null;
+              const requestedText = requestedAt && !Number.isNaN(requestedAt.getTime()) ? requestedAt.toLocaleString('vi-VN') : '—';
+              const ackText = ackAt && !Number.isNaN(ackAt.getTime()) ? ackAt.toLocaleString('vi-VN') : '—';
+              return (
+                <div key={device.id} style={{ borderTop: '1px solid oklch(26% 0.02 250)', padding: '14px 0 2px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', flexWrap: 'wrap' }}>
+                    <div>
+                      <div style={{ fontSize: '13.5px', fontWeight: 600 }}>{device.name}</div>
+                      <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '11px', color: 'oklch(58% 0.015 250)', marginTop: '3px' }}>{device.aws_thing_name}</div>
+                    </div>
+                    <span style={{ fontSize: '11.5px', fontWeight: 700, padding: '5px 10px', borderRadius: '20px', color: sync.color, background: sync.background }}>{sync.label}</span>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '8px 18px', marginTop: '12px', fontSize: '11.5px', color: 'oklch(65% 0.015 250)' }}>
+                    <div>Version yêu cầu: <strong style={{ color: 'oklch(82% 0.01 250)' }}>{configVersionLabel(device.config_version_desired)}</strong></div>
+                    <div>Version STM32 xác nhận: <strong style={{ color: 'oklch(82% 0.01 250)' }}>{configVersionLabel(device.config_version_applied)}</strong></div>
+                    <div>Gửi lúc: <strong style={{ color: 'oklch(82% 0.01 250)' }}>{requestedText}</strong></div>
+                    <div>ACK lúc: <strong style={{ color: 'oklch(82% 0.01 250)' }}>{ackText}</strong></div>
+                  </div>
+                  {device.config_hash_desired && (
+                    <div style={{ marginTop: '9px', fontFamily: "'IBM Plex Mono',monospace", fontSize: '10.5px', color: 'oklch(55% 0.015 250)' }}>
+                      Hash yêu cầu: {device.config_hash_desired.slice(0, 16)}…
+                    </div>
+                  )}
+                  {device.config_sync_error && (
+                    <div style={{ marginTop: '8px', fontSize: '12px', color: 'oklch(80% 0.14 25)' }}>Chi tiết: {device.config_sync_error}</div>
+                  )}
+                  {sync.status === 'unknown' && (
+                    <div style={{ marginTop: '8px', fontSize: '11.5px', color: 'oklch(58% 0.015 250)' }}>Thiết bị hoặc database chưa gửi snapshot ACK cấu hình.</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
 
         {/* CALIBRATION */}
         <div id="dsec-calibration" style={{ scrollMarginTop: '24px', marginBottom: '32px' }}>
           <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '26px', fontWeight: 700, margin: '0 0 4px' }}>Hiệu chỉnh cảm biến<DemoBadge /></h1>
           <p style={{ fontSize: '13px', color: 'oklch(62% 0.015 250)', margin: '0 0 20px' }}>Điều chỉnh hệ số nhân &amp; độ lệch để bù sai số ADC phần cứng</p>
+
+          <div style={{ background: 'oklch(30% 0.06 70)', border: '1px solid oklch(52% 0.12 70 / 0.45)', borderRadius: '10px', padding: '12px 14px', marginBottom: '16px', fontSize: '12.5px', color: 'oklch(82% 0.08 70)' }}>
+            Hiệu chỉnh cảm biến hiện vẫn là giao diện demo, chưa có luồng lưu/gửi xuống STM32 nên chưa có ACK cấu hình cho phần này.
+          </div>
 
           <div style={{ background: 'oklch(19% 0.022 250)', border: '1px solid oklch(30% 0.02 250)', borderRadius: '12px', padding: '20px' }}>
             {SENSORS.map((item) => (
@@ -2000,47 +2150,6 @@ export default function DevConsole() {
                 ))}
               </div>
             )}
-          </div>
-        </div>
-
-        {/* SIMULATION */}
-        <div id="dsec-simulation" style={{ scrollMarginTop: '24px', marginBottom: '40px' }}>
-          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: '26px', fontWeight: 700, margin: '0 0 4px' }}>Chế độ mô phỏng dữ liệu<DemoBadge /></h1>
-          <p style={{ fontSize: '13px', color: 'oklch(62% 0.015 250)', margin: '0 0 20px' }}>Giả lập dữ liệu cảm biến để phát triển UI khi chưa có phần cứng</p>
-
-          <div style={{ background: 'oklch(19% 0.022 250)', border: '1px solid oklch(30% 0.02 250)', borderRadius: '12px', padding: '20px', marginBottom: '16px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px', flexWrap: 'wrap' }}>
-              <div>
-                <div style={{ fontSize: '14px', fontWeight: 600, marginBottom: '4px' }}>Bật chế độ mô phỏng</div>
-                <div style={{ fontSize: '12.5px', color: 'oklch(62% 0.015 250)', maxWidth: '440px' }}>Khi bật, giao diện người dùng hiển thị dữ liệu giả lập bên dưới thay vì đọc từ cảm biến thật.</div>
-              </div>
-              <Switch on={simMode} onClick={() => setSimMode((v) => !v)} />
-            </div>
-          </div>
-
-          <div style={{ background: 'oklch(19% 0.022 250)', border: '1px solid oklch(30% 0.02 250)', borderRadius: '12px', padding: '24px' }}>
-            <div style={{ marginBottom: '22px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                <label style={{ fontSize: '13px', fontWeight: 600 }}>Công suất mặt trời</label>
-                <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '13px', color: ACCENT }}>{Math.round(simSolar * 1000).toLocaleString('vi-VN')} W</span>
-              </div>
-              <input type="range" min="0" max="5" step="0.1" value={simSolar} onChange={(e) => setSimSolar(parseFloat(e.target.value))} style={{ width: '100%', accentColor: ACCENT }} />
-            </div>
-            <div style={{ marginBottom: '22px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                <label style={{ fontSize: '13px', fontWeight: 600 }}>Pin lưu trữ</label>
-                <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '13px', color: ACCENT }}>{Math.round(simBattery)} %</span>
-              </div>
-              <input type="range" min="0" max="100" step="1" value={simBattery} onChange={(e) => setSimBattery(parseFloat(e.target.value))} style={{ width: '100%', accentColor: ACCENT }} />
-            </div>
-            <div style={{ marginBottom: '24px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                <label style={{ fontSize: '13px', fontWeight: 600 }}>Tải tiêu thụ</label>
-                <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: '13px', color: ACCENT }}>{Math.round(simLoad * 1000).toLocaleString('vi-VN')} W</span>
-              </div>
-              <input type="range" min="0" max="3" step="0.1" value={simLoad} onChange={(e) => setSimLoad(parseFloat(e.target.value))} style={{ width: '100%', accentColor: ACCENT }} />
-            </div>
-            <button style={{ padding: '11px 22px', borderRadius: '8px', border: 'none', background: ACCENT, color: 'oklch(12% 0.02 250)', fontSize: '13.5px', fontWeight: 700, cursor: 'pointer' }}>Áp dụng mô phỏng</button>
           </div>
         </div>
 

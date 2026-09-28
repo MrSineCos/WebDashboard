@@ -109,6 +109,15 @@ const FW_IN_FLIGHT = new Set(["pending", "downloading", "applying"]);
 const FW_VERSION_MAX = 64;
 const FW_DETAIL_MAX = 200;
 
+const CONFIG_ACK_STATUSES = new Set([
+  "received",
+  "applying",
+  "applied",
+  "already_applied",
+  "rejected",
+  "timeout",
+]);
+
 function validApReport(ssid: unknown, password: unknown): boolean {
   if (typeof ssid !== "string" || typeof password !== "string") return false;
   if (ssid.length === 0) return false;
@@ -225,7 +234,9 @@ Deno.serve(async (req) => {
   const { data: device, error: deviceErr } = await admin
     .from("devices")
     .select(
-      "id, name, station_id, owner_id, ap_ssid, ap_password, fw_version, fw_status, fw_target_id",
+      "id, name, station_id, owner_id, ap_ssid, ap_password, fw_version, fw_status, fw_target_id, " +
+        "config_id_desired, config_version_desired, config_hash_desired, " +
+        "config_sync_status, config_version_applied, config_hash_applied",
     )
     .eq("aws_thing_name", clientId)
     .maybeSingle();
@@ -331,7 +342,103 @@ Deno.serve(async (req) => {
     );
   }
 
-  // 6. Optional load-state ack: firmware that switches relays for one or
+  // 6. BMS config acknowledgement. The device must echo the request identity
+  // before this endpoint changes the snapshot. A telemetry message from the
+  // right AWS Thing is authenticated, but an old/replayed ACK must still not
+  // mark the current request as applied.
+  const rawConfigAck = payload.bms_config_ack ?? payload.bmsConfigAck;
+  if (rawConfigAck && typeof rawConfigAck === "object" && !Array.isArray(rawConfigAck)) {
+    const ack = rawConfigAck as Record<string, unknown>;
+    const rawStatus = ack.status;
+    const status = rawStatus === "ok" ? "applied" : rawStatus;
+    const configId = typeof (ack.config_id ?? ack.configId) === "string"
+      ? String(ack.config_id ?? ack.configId)
+      : "";
+    const rawVersion = ack.config_version ?? ack.configVersion;
+    const configVersion = typeof rawVersion === "number" && Number.isInteger(rawVersion)
+      ? rawVersion
+      : null;
+    const configHash = typeof (ack.config_hash ?? ack.configHash) === "string"
+      ? String(ack.config_hash ?? ack.configHash)
+      : "";
+    const detail = typeof ack.detail === "string"
+      ? ack.detail.slice(0, 200)
+      : typeof ack.error === "string"
+        ? ack.error.slice(0, 200)
+        : null;
+
+    const identityMatches =
+      typeof status === "string" &&
+      CONFIG_ACK_STATUSES.has(status) &&
+      configId === device.config_id_desired &&
+      configVersion !== null &&
+      configVersion === device.config_version_desired &&
+      configHash === device.config_hash_desired;
+
+    if (!identityMatches) {
+      await logEventThrottled(
+        device.owner_id,
+        device.station_id,
+        device.id,
+        "warn",
+        "bms_config_ack_rejected",
+        `${device.name} báo ACK cấu hình BMS không khớp request đang chờ — không cập nhật trạng thái thiết bị.`,
+        {
+          client_id: clientId,
+          status,
+          config_id: configId || null,
+          config_version: configVersion,
+        },
+      );
+    } else {
+      const now = new Date().toISOString();
+      const applied = status === "applied" || status === "already_applied";
+      const patch: Record<string, unknown> = {
+        config_sync_status: status,
+        config_sync_error: applied ? null : detail ?? status,
+        config_sync_ack_at: now,
+      };
+      if (applied && configVersion !== null) {
+        patch.config_version_applied = configVersion;
+        patch.config_hash_applied = configHash || device.config_hash_desired;
+      }
+
+      const { error: configUpdateErr } = await admin
+        .from("devices")
+        .update(patch)
+        .eq("id", device.id);
+      if (configUpdateErr) {
+        await logEventThrottled(
+          device.owner_id,
+          device.station_id,
+          device.id,
+          "error",
+          "bms_config_ack_write_failed",
+          `Không ghi được ACK cấu hình BMS của ${device.name} vào snapshot thiết bị.`,
+          { detail: configUpdateErr.message, client_id: clientId },
+        );
+      } else if (applied || status === "rejected") {
+        await logEvent(
+          device.owner_id,
+          device.station_id,
+          device.id,
+          applied ? "info" : "error",
+          applied ? "bms_config_applied" : "bms_config_rejected",
+          applied
+            ? `${device.name} đã áp dụng cấu hình BMS version ${configVersion}.`
+            : `${device.name} từ chối cấu hình BMS version ${configVersion ?? "không rõ"}${detail ? ` — ${detail}` : ""}.`,
+          {
+            config_id: configId || null,
+            config_version: configVersion,
+            config_hash: configHash || null,
+            status,
+          },
+        );
+      }
+    }
+  }
+
+  // 7. Optional load-state ack: firmware that switches relays for one or
   // more loads (see send-load-command) may report their actual state back
   // in the same telemetry message as `"loads": {"<load_id>": "on"|"off"}`.
   // We use the service role here (same as everywhere in this function) —
@@ -350,7 +457,7 @@ Deno.serve(async (req) => {
     }
   }
 
-  // 7. Optional SoftAP report (migration 0014). Firmware sends `ap_ssid` +
+  // 8. Optional SoftAP report (migration 0014). Firmware sends `ap_ssid` +
   // `ap_password` on its first publish after each (re)connect, so the
   // dashboard shows the network the device is really broadcasting. Skipped
   // when unchanged to avoid a write every reconnect.
@@ -385,7 +492,7 @@ Deno.serve(async (req) => {
     }
   }
 
-  // 8. Optional firmware report (migration 0015) — the return leg of the OTA
+  // 9. Optional firmware report (migration 0015) — the return leg of the OTA
   // flow started by send-ota-command. Two independent things a device may
   // send: `fw_version` (what it is ACTUALLY running) and `fw_status` +
   // `fw_status_detail` (how the last OTA attempt is going). This is the only

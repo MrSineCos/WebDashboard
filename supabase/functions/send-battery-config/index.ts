@@ -25,6 +25,7 @@ import {
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
+const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 
 const iotData = new IoTDataPlaneClient({
   region: Deno.env.get("AWS_REGION")!,
@@ -44,6 +45,12 @@ const CORS_HEADERS = {
 
 const VALID_MODES = new Set(["low", "balanced", "max"]);
 
+const admin = SUPABASE_SERVICE_ROLE_KEY
+  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { persistSession: false },
+  })
+  : null;
+
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -53,8 +60,21 @@ function json(body: unknown, status = 200): Response {
 
 // Ép các ngưỡng về số/boolean hợp lệ trước khi gửi xuống thiết bị, để một hàng
 // battery_modes hỏng (thiếu trường, sai kiểu) không đẩy giá trị rác vào firmware.
+// Dải dòng sạc tối đa của pack 12 V — khớp CHARGE_CURRENT_* ở DevConsole.jsx.
+// Kẹp lại ở đây để cấu hình cũ (35/25/15 A của pack 48 V) không lọt xuống STM32.
+const CHARGE_CURRENT_MIN = 3;
+const CHARGE_CURRENT_MAX = 8;
+
 function num(v: unknown, fallback: number): number {
   return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 Deno.serve(async (req) => {
@@ -96,28 +116,37 @@ Deno.serve(async (req) => {
   if (!cfg) return json({ error: "mode_config_missing" }, 400);
 
   // Payload ngưỡng gửi xuống thiết bị. Tên trường khớp firmware onCommand().
-  const configPayload = {
+  // A device must be able to echo these values after ESP32 -> STM32 has
+  // completed. `configVersion` is monotonic enough for the current push path;
+  // the hash prevents an ACK for a different payload with the same version.
+  const configId = crypto.randomUUID();
+  const configVersion = Date.now();
+  const configCore = {
     type: "battery_config",
+    target: "stm32_bms",
+    configId,
+    configVersion,
     mode,
     minSoc: num(cfg.minSoc, 20),
     maxSoc: num(cfg.maxSoc, 90),
-    maxVoltage: num(cfg.maxVoltage, 54.6),
-    maxCurrent: num(cfg.maxCurrent, 25),
+    maxVoltage: num(cfg.maxVoltage, 14.4),
+    maxCurrent: Math.min(CHARGE_CURRENT_MAX, Math.max(CHARGE_CURRENT_MIN, num(cfg.maxCurrent, 6))),
     deepDischargeProtect: cfg.deepDischargeProtect !== false,
-    ts: Date.now(),
   };
+  const configHash = await sha256Hex(JSON.stringify(configCore));
+  const configPayload = { ...configCore, configHash, ts: Date.now() };
 
   // Mọi ESP32 của trạm (mỗi thiết bị 1 topic command riêng).
   const { data: devices, error: devErr } = await userClient
     .from("devices")
-    .select("aws_thing_name")
+    .select("id, aws_thing_name")
     .eq("station_id", station_id)
     .eq("type", "esp32");
   if (devErr) return json({ error: "lookup_failed", detail: devErr.message }, 500);
   if (!devices || devices.length === 0) {
     // Không có thiết bị điều khiển — cấu hình vẫn được lưu ở station_settings,
     // chỉ là chưa có đích để đẩy. Không coi là lỗi cứng.
-    return json({ ok: true, published: 0, mode });
+    return json({ ok: true, published: 0, mode, config_id: configId, config_version: configVersion });
   }
 
   const encoded = new TextEncoder().encode(JSON.stringify(configPayload));
@@ -135,8 +164,52 @@ Deno.serve(async (req) => {
 
   const published = results.filter((r) => r.status === "fulfilled").length;
   const failed = results.length - published;
-  if (published === 0) {
-    return json({ error: "publish_failed", published, failed, mode }, 502);
+
+  // The browser must never claim that a device applied configuration. This
+  // snapshot is only the cloud-side delivery state; the firmware changes it
+  // to `applied` later when its telemetry contains a matching ACK.
+  let statusWriteFailed = false;
+  if (admin) {
+    const now = new Date().toISOString();
+    const writes = devices.map((device, index) => {
+      const publishedToDevice = results[index]?.status === "fulfilled";
+      return admin
+        .from("devices")
+        .update({
+          config_id_desired: configId,
+          config_version_desired: configVersion,
+          config_hash_desired: configHash,
+          config_sync_status: publishedToDevice ? "pending" : "publish_failed",
+          config_sync_error: publishedToDevice ? null : "aws_publish_failed",
+          config_sync_requested_at: now,
+          config_sync_ack_at: null,
+        })
+        .eq("id", device.id);
+    });
+    const writeResults = await Promise.all(writes);
+    statusWriteFailed = writeResults.some((result) => result.error);
+  } else {
+    statusWriteFailed = true;
   }
-  return json({ ok: true, published, failed, mode });
+
+  if (published === 0) {
+    return json({
+      error: "publish_failed",
+      published,
+      failed,
+      mode,
+      config_id: configId,
+      config_version: configVersion,
+      status_write_failed: statusWriteFailed,
+    }, 502);
+  }
+  return json({
+    ok: true,
+    published,
+    failed,
+    mode,
+    config_id: configId,
+    config_version: configVersion,
+    status_write_failed: statusWriteFailed,
+  });
 });
